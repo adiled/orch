@@ -20,8 +20,9 @@ except ImportError:
     sys.exit(1)
 
 # -- Configure library defaults for GitHub-safe rendering --
-# These set the default CSS applied inline by the library.
 rr.INTERNAL_ALIGNMENT = "left"
+rr.CHAR_WIDTH = 10        # default 8.5 clips text in boxes at font-size 14
+rr.COMMENT_CHAR_WIDTH = 8
 
 
 def T(text):
