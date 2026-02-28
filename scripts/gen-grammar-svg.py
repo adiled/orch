@@ -3,16 +3,25 @@
 
 Uses the railroad-diagrams library (pip install railroad-diagrams).
 This script is the rendering counterpart to grammar.ebnf — keep them in sync.
+
+GitHub strips <style> tags from SVGs for security, so we configure the
+library to use inline styles and inject them via post-processing.
 """
 
+import re
 import sys
 import os
+from io import StringIO
 
 try:
     import railroad as rr
 except ImportError:
     print("error: pip install railroad-diagrams", file=sys.stderr)
     sys.exit(1)
+
+# -- Configure library defaults for GitHub-safe rendering --
+# These set the default CSS applied inline by the library.
+rr.INTERNAL_ALIGNMENT = "left"
 
 
 def T(text):
@@ -25,7 +34,8 @@ def NT(text):
     return rr.NonTerminal(text)
 
 
-def section_comment(text):
+def Cmt(text):
+    """Annotation comment."""
     return rr.Comment(text)
 
 
@@ -33,9 +43,9 @@ def build_diagrams():
     """Build all grammar rule diagrams, grouped by section."""
     diagrams = []
 
-    def add(name, *items, label=None):
+    def add(name, *items):
         d = rr.Diagram(rr.Sequence(*items), type="complex")
-        diagrams.append((label or name, d))
+        diagrams.append((name, d))
 
     # ── Document structure ──
 
@@ -101,35 +111,84 @@ def build_diagrams():
         ),
     )
 
+    # Split common_directive into logical sub-groups to keep diagrams readable
+
     add("common_directive",
+        rr.Choice(0,
+            NT("env_directive"),
+            NT("dependency_directive"),
+            NT("health_directive"),
+            NT("lifecycle_directive"),
+            NT("restart_directive"),
+            NT("timeout_directive"),
+            NT("resource_directive"),
+            NT("logging_directive"),
+        ),
+    )
+
+    add("env_directive",
         rr.Choice(0,
             rr.Sequence(T("WORKDIR"), NT("path")),
             rr.Sequence(T("ENV"), NT("env_key"), T("="), NT("value")),
             rr.Sequence(T("ENV_FILE"), NT("path")),
+        ),
+    )
+
+    add("dependency_directive",
+        rr.Choice(0,
             rr.Sequence(T("REQUIRES"), NT("service_name"),
                         rr.ZeroOrMore(NT("service_name"))),
             rr.Sequence(T("AFTER"), NT("service_name"),
                         rr.ZeroOrMore(NT("service_name"))),
+        ),
+    )
+
+    add("health_directive",
+        rr.Choice(0,
             rr.Sequence(T("HEALTHCHECK"),
                         rr.Choice(0, NT("url"), NT("command_string"))),
             rr.Sequence(T("READINESS_TIMEOUT"), NT("duration")),
+        ),
+    )
+
+    add("lifecycle_directive",
+        rr.Choice(0,
             rr.Sequence(T("ONESHOT"), NT("bool")),
             rr.Sequence(T("DISABLED"), NT("bool")),
             rr.Sequence(T("RECREATE"), NT("recreate_policy")),
+        ),
+    )
+
+    add("restart_directive",
+        rr.Choice(0,
             rr.Sequence(T("RESTART"), NT("restart_policy")),
             rr.Sequence(T("RESTART_DELAY"), NT("duration")),
-            rr.Sequence(T("TIMEOUT_START"), NT("duration")),
-            rr.Sequence(T("TIMEOUT_STOP"), NT("duration")),
             rr.Sequence(T("START_LIMIT_BURST"), NT("integer")),
             rr.Sequence(T("START_LIMIT_INTERVAL"), NT("duration")),
+        ),
+    )
+
+    add("timeout_directive",
+        rr.Choice(0,
+            rr.Sequence(T("TIMEOUT_START"), NT("duration")),
+            rr.Sequence(T("TIMEOUT_STOP"), NT("duration")),
+        ),
+    )
+
+    add("resource_directive",
+        rr.Choice(0,
             rr.Sequence(T("MEMORY"), NT("memory_size")),
             rr.Sequence(T("CPUS"), NT("number")),
             rr.Sequence(T("CPU_QUOTA"), NT("percentage")),
             rr.Sequence(T("LIMIT_NOFILE"), NT("integer")),
             rr.Sequence(T("LIMIT_NPROC"), NT("integer")),
             rr.Sequence(T("TASKS_MAX"), NT("integer")),
-            rr.Sequence(T("IO_WEIGHT"), NT("integer"),
-                        section_comment("10-1000")),
+            rr.Sequence(T("IO_WEIGHT"), NT("integer"), Cmt("10-1000")),
+        ),
+    )
+
+    add("logging_directive",
+        rr.Choice(0,
             rr.Sequence(T("STDOUT"), NT("path")),
             rr.Sequence(T("STDERR"), NT("path")),
         ),
@@ -142,7 +201,7 @@ def build_diagrams():
         rr.ZeroOrMore(
             rr.Choice(0, NT("letter"), NT("digit"), T("-")),
         ),
-        section_comment("max 63"),
+        Cmt("max 63"),
     )
 
     add("var_ref",
@@ -181,68 +240,118 @@ def build_diagrams():
     return diagrams
 
 
-def render_svg(diagrams, output_path):
-    """Render all diagrams into a single SVG file."""
-    with open(output_path, "w") as f:
-        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-        f.write('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">\n')
+def diagram_to_svg(diagram):
+    """Render a single diagram to SVG string."""
+    buf = StringIO()
+    diagram.writeSvg(buf.write)
+    return buf.getvalue()
 
-        # Collect all individual SVGs as strings first to compute layout
-        items = []
-        for name, diagram in diagrams:
-            from io import StringIO
-            buf = StringIO()
-            diagram.writeSvg(buf.write)
-            items.append((name, buf.getvalue()))
 
-        f.write('<style>\n')
-        f.write('  svg.railroad-group { font: bold 14px monospace; }\n')
-        f.write('  .rule-label { font: bold 16px sans-serif; fill: #333; }\n')
-        f.write('</style>\n')
-
-        y_offset = 10
-        for name, svg_content in items:
-            # Write label
-            f.write(f'<text x="10" y="{y_offset + 18}" class="rule-label">{name}</text>\n')
-            y_offset += 30
-
-            # Extract inner SVG dimensions and content
-            # The railroad library outputs a full <svg> element; we embed as <g>
-            import re
-            # Get width/height from the SVG
-            w_match = re.search(r'width="([^"]+)"', svg_content)
-            h_match = re.search(r'height="([^"]+)"', svg_content)
-            width = float(w_match.group(1)) if w_match else 800
-            height = float(h_match.group(1)) if h_match else 100
-
-            # Strip outer <svg> tags, keep inner content
-            inner = re.sub(r'<\?xml[^>]*\?>\s*', '', svg_content)
-            inner = re.sub(r'<svg[^>]*>', f'<g transform="translate(10,{y_offset})">', inner, count=1)
-            inner = inner.replace('</svg>', '</g>')
-
-            f.write(inner)
-            f.write('\n')
-
-            y_offset += height + 20
-
-        # Now set the total dimensions
-        f.write('</svg>\n')
-
-        # Rewrite with correct dimensions
-        total_height = y_offset + 10
-
-    # Re-read and fix the outer SVG dimensions
-    with open(output_path, "r") as f:
-        content = f.read()
-
-    content = content.replace(
-        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">',
-        f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
-        f'width="900" viewBox="0 0 900 {int(total_height)}">'
+def extract_dimensions(svg_str):
+    """Extract width and height from an SVG string."""
+    w = re.search(r'width="([^"]+)"', svg_str)
+    h = re.search(r'height="([^"]+)"', svg_str)
+    return (
+        float(w.group(1)) if w else 600,
+        float(h.group(1)) if h else 100,
     )
 
-    with open(output_path, "w") as f:
-        f.write(content)
+
+def strip_svg_wrapper(svg_str):
+    """Remove outer <svg> tags, return inner content."""
+    s = re.sub(r'<\?xml[^>]*\?>\s*', '', svg_str)
+    s = re.sub(r'<svg[^>]*>', '', s, count=1)
+    s = s.replace('</svg>', '')
+    return s.strip()
+
+
+def inject_inline_styles(inner_svg):
+    """Replace class-based styling with inline styles for GitHub compatibility.
+
+    GitHub strips <style> tags from SVGs. We inject inline attributes
+    only into library-generated diagram content (not our wrapper elements).
+    """
+    # Strip all class attributes (GitHub ignores them without <style>)
+    inner_svg = re.sub(r'\s*class="[^"]*"', '', inner_svg)
+
+    # <rect> without existing fill: add white fill + dark border
+    # Use negative lookahead to skip rects that already have fill=
+    inner_svg = re.sub(
+        r'<rect (?!fill=)',
+        '<rect fill="#fff" stroke="#222" ',
+        inner_svg,
+    )
+
+    # <path> without existing stroke: add dark stroke
+    inner_svg = re.sub(
+        r'<path (?!fill=)',
+        '<path fill="none" stroke="#222" stroke-width="2" ',
+        inner_svg,
+    )
+
+    # <text> without existing fill: add dark fill + font
+    inner_svg = re.sub(
+        r'<text (?!fill=)',
+        '<text fill="#222" font-family="monospace" font-size="14" ',
+        inner_svg,
+    )
+
+    return inner_svg
+
+
+def render_svg(diagrams, output_path):
+    """Render all diagrams into a single SVG file with inline styles."""
+    # First pass: render each diagram and collect dimensions
+    rendered = []
+    max_width = 0
+    for name, diagram in diagrams:
+        svg_str = diagram_to_svg(diagram)
+        w, h = extract_dimensions(svg_str)
+        inner = strip_svg_wrapper(svg_str)
+        max_width = max(max_width, w)
+        rendered.append((name, inner, w, h))
+
+    padding = 20
+    total_width = max_width + padding * 2
+    label_height = 28
+    gap = 16
+
+    # Second pass: lay out vertically
+    y = padding
+    body_parts = []
+
+    for name, inner, w, h in rendered:
+        # Inject inline styles into this diagram's content
+        styled_inner = inject_inline_styles(inner)
+
+        # Rule label
+        body_parts.append(
+            f'<text x="{padding}" y="{y + 18}" '
+            f'fill="#333" font-family="sans-serif" font-size="16" font-weight="bold">'
+            f'{name}</text>'
+        )
+        y += label_height
+
+        # Diagram content
+        body_parts.append(
+            f'<g transform="translate({padding},{y})">{styled_inner}</g>'
+        )
+        y += h + gap
+
+    total_height = y + padding
+
+    # Assemble final SVG
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{int(total_width)}" '
+        f'viewBox="0 0 {int(total_width)} {int(total_height)}">\n'
+        f'<rect width="100%" height="100%" fill="#fff"/>\n'
+    )
+    svg += '\n'.join(body_parts)
+    svg += '\n</svg>\n'
+
+    with open(output_path, 'w') as f:
+        f.write(svg)
 
 
 def main():
