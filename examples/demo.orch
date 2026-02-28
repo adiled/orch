@@ -1,0 +1,46 @@
+# Example Orchfile for a typical Django + Postgres + Redis stack
+
+ARG postgres_port=5433
+ARG postgres_memory=4G
+ARG django_port=9090
+
+SERVICE postgres
+FROM pgvector/pgvector:pg15
+MEMORY ${postgres_memory}
+CPUS 2
+PUBLISH ${postgres_port}:5432
+VOLUME postgres-data:/var/lib/postgresql/data
+ENV POSTGRES_USER=postgres
+ENV POSTGRES_PASSWORD=canary
+HEALTHCHECK pg_isready -h localhost -p ${postgres_port}
+RESTART on-failure
+RESTART_DELAY 5s
+
+SERVICE redis
+FROM redis:6.2.0-alpine
+MEMORY 1G
+CPUS 1
+PUBLISH 6380:6379
+RECREATE always
+HEALTHCHECK redis-cli -h localhost -p 6380 ping
+RESTART always
+
+SERVICE django
+RUN python manage.py runserver 0.0.0.0:${django_port}
+WORKDIR backend/canary
+ENV DJANGO_SETTINGS_MODULE=canary.settings.dev
+ENV_FILE ${ORCH_PROJECT}/.env.local
+REQUIRES postgres redis
+AFTER localstack
+HEALTHCHECK http://localhost:${django_port}/health
+RESTART on-failure
+RESTART_DELAY 2s
+MEMORY 2G
+LIMIT_NOFILE 65536
+TIMEOUT_START 60s
+
+SERVICE db-migrate
+FROM flyway/flyway:latest
+CMD -url=jdbc:postgresql://postgres/canary migrate
+REQUIRES postgres
+ONESHOT true

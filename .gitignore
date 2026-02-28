@@ -1,0 +1,6 @@
+/target/
+.orch/
+*.swp
+*.swo
+*~
+.DS_Store
