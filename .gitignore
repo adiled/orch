@@ -4,3 +4,12 @@
 *.swo
 *~
 .DS_Store
+
+# LaTeX aux files
+*.aux
+*.log
+*.toc
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz

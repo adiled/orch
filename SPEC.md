@@ -28,9 +28,7 @@ Orchfile is inspired by Containerfile's declarative simplicity, not docker-compo
 
 ## Grammar (EBNF)
 
-The formal grammar is defined in ISO 14977 EBNF in [`grammar.ebnf`](grammar.ebnf). A railroad diagram is generated from it at [`docs/grammar.svg`](docs/grammar.svg).
-
-![Orchfile Grammar](docs/grammar.svg)
+The formal grammar is defined in W3C EBNF in [`grammar.ebnf`](grammar.ebnf). A typeset version with railroad diagrams is available in [`docs/grammar.pdf`](docs/grammar.pdf).
 
 **Notes**: `var_ref` (`${name}`) may appear within any `value`, `path`, `image_ref`, or `command_string`. Expansion is performed at parse time using resolved ARG values. Unresolved references to built-in variables (e.g. `${ORCH_PROJECT}`) are preserved for runtime resolution.
 

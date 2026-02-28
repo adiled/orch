@@ -1,26 +1,41 @@
 #!/bin/bash
-# pre-push hook: regenerate grammar SVG and amend if it changed.
+# pre-push hook: regenerate grammar PDF and amend if it changed.
 # Install: cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#
+# Requires: pdflatex (TinyTeX or any TeX Live distribution)
 
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-SVG="$ROOT/docs/grammar.svg"
+PDF="$ROOT/docs/grammar.pdf"
+TEX="$ROOT/docs/grammar.tex"
 
-# Snapshot current SVG hash
-old_hash=""
-if [ -f "$SVG" ]; then
-    old_hash=$(git hash-object "$SVG")
+# Find pdflatex
+PDFLATEX="${PDFLATEX:-$(command -v pdflatex 2>/dev/null || echo "$HOME/Library/TinyTeX/bin/universal-darwin/pdflatex")}"
+if [ ! -x "$PDFLATEX" ]; then
+    echo "pre-push: pdflatex not found, skipping grammar PDF generation"
+    exit 0
 fi
 
-# Regenerate
-python3 "$ROOT/scripts/gen-grammar-svg.py" >/dev/null 2>&1
+# Snapshot current PDF hash
+old_hash=""
+if [ -f "$PDF" ]; then
+    old_hash=$(git hash-object "$PDF")
+fi
 
-new_hash=$(git hash-object "$SVG")
+# Regenerate (two passes for TOC)
+cd "$ROOT/docs"
+"$PDFLATEX" -interaction=nonstopmode grammar.tex >/dev/null 2>&1
+"$PDFLATEX" -interaction=nonstopmode grammar.tex >/dev/null 2>&1
+
+# Clean aux files
+rm -f grammar.aux grammar.log grammar.toc grammar.out
+
+new_hash=$(git hash-object "$PDF")
 
 if [ "$old_hash" != "$new_hash" ]; then
-    echo "pre-push: grammar.svg changed, amending commit..."
-    git add "$SVG"
+    echo "pre-push: grammar.pdf changed, amending commit..."
+    git add "$PDF"
     git commit --amend --no-edit --quiet
-    echo "pre-push: commit amended with updated grammar.svg"
+    echo "pre-push: commit amended with updated grammar.pdf"
 fi

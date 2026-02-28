@@ -241,9 +241,7 @@ error: validation error: service 'a': dependency cycle detected: a -> b -> a
 
 ## Grammar
 
-The formal EBNF grammar is in [`grammar.ebnf`](grammar.ebnf). Railroad diagram:
-
-![Orchfile Grammar](docs/grammar.svg)
+The formal EBNF grammar is in [`grammar.ebnf`](grammar.ebnf). A typeset version with railroad diagrams is in [`docs/grammar.pdf`](docs/grammar.pdf).
 
 ## Specification
 
