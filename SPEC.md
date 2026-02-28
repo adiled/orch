@@ -26,23 +26,105 @@ Orchfile is inspired by Containerfile's declarative simplicity, not docker-compo
 - Case-sensitive directives (uppercase)
 - No continuation lines (each directive is one line)
 
-## Grammar
+## Grammar (EBNF)
 
+ISO 14977 Extended Backus-Naur Form. Each line in the file is processed independently.
+
+```ebnf
+(* ---- Document structure ---- *)
+
+orchfile       = { line , newline } ;
+line           = blank | comment | arg | service_decl | directive ;
+blank          = { ws } ;
+comment        = { ws } , "#" , { any } ;
+
+(* ---- Top-level ---- *)
+
+arg            = "ARG" , ws , identifier , "=" , value ;
+service_decl   = "SERVICE" , ws , service_name ;
+
+(* ---- Directives ---- *)
+
+directive      = mode_directive
+               | container_directive
+               | host_directive
+               | common_directive ;
+
+(* Execution mode — mutually exclusive per service *)
+mode_directive       = "FROM" , ws , image_ref
+                     | "RUN" , ws , command_string ;
+
+(* Container-only *)
+container_directive  = "ENTRYPOINT" , ws , command_string
+                     | "CMD" , ws , command_string
+                     | "PUBLISH" , ws , port , ":" , port
+                     | "VOLUME" , ws , volume_source , ":" , path ;
+
+(* Host-only *)
+host_directive       = "USER" , ws , identifier
+                     | "STOP" , ws , command_string
+                     | "RELOAD" , ws , command_string ;
+
+(* Common *)
+common_directive     = "WORKDIR" , ws , path
+                     | "ENV" , ws , env_key , "=" , value
+                     | "ENV_FILE" , ws , path
+                     | "REQUIRES" , ws , service_name , { ws , service_name }
+                     | "AFTER" , ws , service_name , { ws , service_name }
+                     | "HEALTHCHECK" , ws , ( url | command_string )
+                     | "READINESS_TIMEOUT" , ws , duration
+                     | "ONESHOT" , ws , bool
+                     | "DISABLED" , ws , bool
+                     | "RECREATE" , ws , recreate_policy
+                     | "RESTART" , ws , restart_policy
+                     | "RESTART_DELAY" , ws , duration
+                     | "TIMEOUT_START" , ws , duration
+                     | "TIMEOUT_STOP" , ws , duration
+                     | "START_LIMIT_BURST" , ws , integer
+                     | "START_LIMIT_INTERVAL" , ws , duration
+                     | "MEMORY" , ws , memory_size
+                     | "CPUS" , ws , number
+                     | "CPU_QUOTA" , ws , percentage
+                     | "LIMIT_NOFILE" , ws , integer
+                     | "LIMIT_NPROC" , ws , integer
+                     | "TASKS_MAX" , ws , integer
+                     | "IO_WEIGHT" , ws , integer         (* 10-1000 *)
+                     | "STDOUT" , ws , path
+                     | "STDERR" , ws , path ;
+
+(* ---- Terminals ---- *)
+
+service_name   = letter , { letter | digit | "-" } ;       (* max 63 chars *)
+identifier     = letter , { letter | digit | "_" } ;
+env_key        = ( letter | "_" ) , { letter | digit | "_" } ;
+
+image_ref      = { any - newline } ;                        (* registry/image:tag *)
+command_string = { any - newline } ;                        (* free-form command *)
+path           = { any - newline } ;                        (* may contain var_ref *)
+value          = { any - newline } ;                        (* may contain var_ref *)
+url            = ( "http://" | "https://" ) , { any - newline } ;
+
+var_ref        = "${" , identifier , "}" ;
+
+bool           = "true" | "false" ;
+restart_policy = "no" | "always" | "on-failure" ;
+recreate_policy = "always" | "never" ;
+
+duration       = integer , ( "s" | "m" ) ;
+memory_size    = integer , ( "K" | "M" | "G" ) ;
+percentage     = integer , "%" ;
+number         = integer , [ "." , digit , { digit } ] ;
+integer        = digit , { digit } ;
+port           = digit , { digit } ;                        (* 1-65535 *)
+
+letter         = "a" | "b" | ... | "z" ;                   (* lowercase only *)
+digit          = "0" | "1" | ... | "9" ;
+ws             = " " | "\t" , { " " | "\t" } ;
+newline        = "\n" ;
+any            = ? any UTF-8 character ? ;
 ```
-orchfile      := (arg | service)*
-arg           := "ARG" name "=" default_value
-service       := "SERVICE" name directive*
-directive     := container_directive | host_directive | common_directive
-container_directive := "FROM" | "ENTRYPOINT" | "CMD" | "PUBLISH" | "VOLUME"
-host_directive      := "RUN" | "USER"
-common_directive    := "WORKDIR" | "ENV" | "ENV_FILE" | "REQUIRES" | "AFTER"
-                     | "HEALTHCHECK" | "READINESS_TIMEOUT" | "ONESHOT" | "DISABLED"
-                     | "RESTART" | "RESTART_DELAY" | "TIMEOUT_START" | "TIMEOUT_STOP"
-                     | "STOP" | "RELOAD" | "START_LIMIT_BURST" | "START_LIMIT_INTERVAL"
-                     | "MEMORY" | "CPUS" | "LIMIT_NOFILE" | "LIMIT_NPROC"
-                     | "CPU_QUOTA" | "IO_WEIGHT" | "TASKS_MAX"
-                     | "STDOUT" | "STDERR" | "RECREATE"
-```
+
+**Notes**: `var_ref` (`${name}`) may appear within any `value`, `path`, `image_ref`, or `command_string`. Expansion is performed at parse time using resolved ARG values. Unresolved references to built-in variables (e.g. `${ORCH_PROJECT}`) are preserved for runtime resolution.
 
 ## Constraints
 
