@@ -239,6 +239,12 @@ error: validation error: service 'app': ENTRYPOINT is only valid with FROM (cont
 error: validation error: service 'a': dependency cycle detected: a -> b -> a
 ```
 
+## Grammar
+
+The formal EBNF grammar is in [`grammar.ebnf`](grammar.ebnf). Railroad diagram:
+
+![Orchfile Grammar](docs/grammar.svg)
+
 ## Specification
 
 See [SPEC.md](SPEC.md) for the complete Orchfile specification.
