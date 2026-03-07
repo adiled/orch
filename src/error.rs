@@ -4,6 +4,7 @@ use std::fmt;
 pub struct ParseError {
     pub line: usize,
     pub message: String,
+    pub file: Option<String>,
 }
 
 impl ParseError {
@@ -11,13 +12,22 @@ impl ParseError {
         ParseError {
             line,
             message: message.into(),
+            file: None,
         }
+    }
+
+    pub fn with_file(mut self, file: impl Into<String>) -> Self {
+        self.file = Some(file.into());
+        self
     }
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "line {}: {}", self.line, self.message)
+        match &self.file {
+            Some(file) => write!(f, "{}, line {}: {}", file, self.line, self.message),
+            None => write!(f, "line {}: {}", self.line, self.message),
+        }
     }
 }
 
@@ -27,6 +37,7 @@ impl std::error::Error for ParseError {}
 pub struct ValidationError {
     pub service: String,
     pub message: String,
+    pub file: Option<String>,
 }
 
 impl ValidationError {
@@ -34,13 +45,22 @@ impl ValidationError {
         ValidationError {
             service: service.into(),
             message: message.into(),
+            file: None,
         }
+    }
+
+    pub fn with_file(mut self, file: impl Into<String>) -> Self {
+        self.file = Some(file.into());
+        self
     }
 }
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "service '{}': {}", self.service, self.message)
+        match &self.file {
+            Some(file) => write!(f, "{}: service '{}': {}", file, self.service, self.message),
+            None => write!(f, "service '{}': {}", self.service, self.message),
+        }
     }
 }
 

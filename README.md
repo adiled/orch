@@ -14,8 +14,8 @@ cp target/release/orch /usr/local/bin/
 ## Usage
 
 ```
-orch parse <file> [--arg name=value ...]
-orch validate <file> [--arg name=value ...]
+orch parse <file> [<file> ...] [--arg name=value ...]
+orch validate <file> [<file> ...] [--arg name=value ...]
 ```
 
 ### Commands
@@ -26,6 +26,22 @@ orch validate <file> [--arg name=value ...]
 | `validate` | "valid" to stderr | 0 if valid, 1 if errors    |
 
 Exit code 2 indicates usage errors (bad arguments, missing file).
+
+### Multi-file Composition
+
+Multiple files are merged left-to-right using a systemd drop-in overlay model:
+
+```sh
+orch parse base.orch staging.orch personal.orch
+```
+
+Merge rules:
+- **Scalars** (FROM, MEMORY, CPUS, ...): last wins
+- **Keyed lists** (ENV, PUBLISH, VOLUME): merge by key, overlay wins on conflict
+- **Positional lists** (REQUIRES, AFTER, ENV_FILE): append + dedup
+- **CLEAR directive**: resets list fields before applying overlay values
+
+See [SPEC.md](SPEC.md) for full composition semantics.
 
 ### ARG Overrides
 
@@ -269,7 +285,7 @@ Additional validations:
 cargo test
 ```
 
-95 tests covering all directives, all constraints (C1-C4), variable expansion, error cases, edge cases, and the full spec example.
+140 tests covering all directives, all constraints (C1-C4), variable expansion, multi-file composition, merge semantics, CLEAR directive, error cases, edge cases, and the full spec example.
 
 ## License
 

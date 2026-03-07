@@ -643,6 +643,135 @@ STDERR /var/log/myapp.err
 
 ---
 
+## File Composition (Overlay Model)
+
+Orchfile supports multi-file composition using a systemd drop-in inspired overlay model. A base Orchfile can be overlaid with environment-specific files (staging, CI, personal) that tune resources, ports, env vars, and dependencies without forking the entire file.
+
+### Usage
+
+```
+orch parse base.orch staging.orch personal.orch [--arg ...]
+orch validate base.orch staging.orch personal.orch [--arg ...]
+```
+
+Files are merged left-to-right. The leftmost file is the base; each subsequent file is an overlay.
+
+### Merge Semantics
+
+#### Scalars: Last Wins
+
+Any scalar directive (`FROM`, `RUN`, `WORKDIR`, `MEMORY`, `CPUS`, etc.) in an overlay replaces the base value. Omitting a scalar in an overlay preserves the base value.
+
+```
+# base.orch
+SERVICE web
+  FROM nginx:1.24
+  MEMORY 1G
+
+# staging.orch — overrides image, preserves MEMORY
+SERVICE web
+  FROM nginx:1.25
+```
+
+#### Keyed Lists: Merge by Key
+
+- **ENV**: Merged by variable name (overlay wins on conflict)
+- **PUBLISH**: Merged by container port (overlay replaces host port for same container port)
+- **VOLUME**: Merged by destination path (overlay replaces source for same destination)
+
+```
+# base.orch
+SERVICE web
+  FROM nginx
+  ENV MODE=production
+  PUBLISH 8080:80
+
+# staging.orch — MODE overridden, DEBUG added, port 80 remapped
+SERVICE web
+  ENV MODE=staging
+  ENV DEBUG=true
+  PUBLISH 9090:80
+```
+
+#### Positional Lists: Append + Dedup
+
+- **REQUIRES**: Appended, duplicates removed
+- **AFTER**: Appended, duplicates removed
+- **ENV_FILE**: Appended, duplicates removed
+
+```
+# base.orch
+SERVICE web
+  FROM nginx
+  REQUIRES db
+
+# staging.orch — adds cache dependency
+SERVICE web
+  REQUIRES cache
+# Result: REQUIRES db cache
+```
+
+#### New Services
+
+Services in overlays that don't exist in the base are appended.
+
+#### Mode Switching
+
+Setting `FROM` in an overlay on a service that had `RUN` clears all host-only directives (`USER`, `STOP`, `RELOAD`) and switches to container mode. Setting `RUN` clears all container-only directives (`ENTRYPOINT`, `CMD`, `PUBLISH`, `VOLUME`) and switches to host mode.
+
+### CLEAR Directive
+
+The `CLEAR` directive resets a list-type field before applying overlay values. Without `CLEAR`, overlay values merge with (append to) base values.
+
+```
+CLEAR ENV
+CLEAR ENV_FILE
+CLEAR PUBLISH
+CLEAR VOLUME
+CLEAR REQUIRES
+CLEAR AFTER
+```
+
+**Valid targets**: Only list-type directives can be cleared. Using `CLEAR` on scalar directives (e.g., `CLEAR FROM`) is a parse error — scalars override by last-wins naturally.
+
+```
+# base.orch
+SERVICE web
+  FROM nginx
+  ENV OLD_KEY=old_value
+  ENV KEEP=this
+
+# overlay.orch — wipe all env, start fresh
+SERVICE web
+  CLEAR ENV
+  ENV FRESH=new_value
+# Result: only FRESH=new_value (OLD_KEY and KEEP are gone)
+```
+
+### ARG Scoping
+
+ARGs are merged left-to-right (last wins). Variable expansion is deferred until all files are merged, so overlays can redefine ARG defaults that affect the base file's `${var}` references.
+
+```
+# base.orch
+ARG port=8080
+SERVICE web
+  FROM nginx
+  PUBLISH ${port}:80
+
+# staging.orch
+ARG port=9090
+# Result: port=9090, so PUBLISH becomes 9090:80
+```
+
+CLI `--arg` overrides take highest priority, above all file defaults.
+
+### Validation
+
+Constraints (C1-C4) are validated on the **merged result**, not on individual files. An overlay file that only sets `ENV` without `FROM` or `RUN` is valid — it inherits the mode from the base file.
+
+---
+
 ## Built-in Variables
 
 Available for expansion in directive values:

@@ -456,7 +456,8 @@ fn test_common__requires() {
 
 #[test]
 fn test_common__requires_multiple_on_one_line() {
-    let input = "SERVICE db\nFROM img\nSERVICE cache\nFROM img\nSERVICE app\nRUN cmd\nREQUIRES db cache\n";
+    let input =
+        "SERVICE db\nFROM img\nSERVICE cache\nFROM img\nSERVICE app\nRUN cmd\nREQUIRES db cache\n";
     let orch = parse_ok(input);
     assert_eq!(orch.services[2].requires, vec!["db", "cache"]);
 }
@@ -490,10 +491,7 @@ fn test_common__healthcheck_http() {
 #[test]
 fn test_common__readiness_timeout() {
     let orch = parse_ok("SERVICE x\nFROM img\nREADINESS_TIMEOUT 120s\n");
-    assert_eq!(
-        orch.services[0].readiness_timeout.as_ref().unwrap(),
-        "120s"
-    );
+    assert_eq!(orch.services[0].readiness_timeout.as_ref().unwrap(), "120s");
 }
 
 #[test]
@@ -546,7 +544,11 @@ fn test_restart__start_limit_burst() {
 fn test_restart__start_limit_interval() {
     let orch = parse_ok("SERVICE x\nFROM img\nSTART_LIMIT_INTERVAL 10s\n");
     assert_eq!(
-        orch.services[0].restart.start_limit_interval.as_ref().unwrap(),
+        orch.services[0]
+            .restart
+            .start_limit_interval
+            .as_ref()
+            .unwrap(),
         "10s"
     );
 }
@@ -804,7 +806,7 @@ ONESHOT true
 fn test_json_serialization() {
     let orch = parse_ok("SERVICE db\nFROM postgres:15\nPUBLISH 5432:5432\n");
     let json = serde_json::to_string_pretty(&orch).unwrap();
-    assert!(json.contains("\"version\": \"0.1.0\""));
+    assert!(json.contains("\"version\": \"0.2.0\""));
     assert!(json.contains("\"name\": \"db\""));
     assert!(json.contains("\"mode\": \"container\""));
     assert!(json.contains("\"host\": 5432"));
@@ -874,4 +876,434 @@ fn test_edge__indented_directives() {
     let input = "SERVICE db\n  FROM postgres:15\n  PUBLISH 5432:5432\n";
     let orch = parse_ok(input);
     assert_eq!(orch.services[0].publish[0].host, 5432);
+}
+
+// =========================================================================
+// Multi-file integration tests (parse_files through full pipeline)
+// =========================================================================
+
+fn parse_files_ok(files: &[(&str, &str)]) -> OrchFile {
+    parse_files(files, &HashMap::new()).expect("parse_files should succeed")
+}
+
+fn parse_files_ok_with_args(
+    files: &[(&str, &str)],
+    overrides: &HashMap<String, String>,
+) -> OrchFile {
+    parse_files(files, overrides).expect("parse_files should succeed")
+}
+
+fn parse_files_err(files: &[(&str, &str)]) -> Vec<OrchError> {
+    parse_files(files, &HashMap::new()).expect_err("parse_files should fail")
+}
+
+#[test]
+fn test_multifile__scalar_override() {
+    let base = r#"
+SERVICE web
+  FROM nginx:1.24
+  WORKDIR /app
+    "#;
+    let overlay = r#"
+SERVICE web
+  FROM nginx:1.25
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].image.as_deref(), Some("nginx:1.25"));
+    assert_eq!(orch.services[0].workdir.as_deref(), Some("/app"));
+}
+
+#[test]
+fn test_multifile__env_merge() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+  ENV MODE=production
+  ENV PORT=80
+    "#;
+    let overlay = r#"
+SERVICE web
+  ENV MODE=staging
+  ENV DEBUG=true
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].env.get("MODE").unwrap(), "staging");
+    assert_eq!(orch.services[0].env.get("PORT").unwrap(), "80");
+    assert_eq!(orch.services[0].env.get("DEBUG").unwrap(), "true");
+}
+
+#[test]
+fn test_multifile__publish_merge_by_container_port() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+  PUBLISH 8080:80
+  PUBLISH 8443:443
+    "#;
+    let overlay = r#"
+SERVICE web
+  PUBLISH 9090:80
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].publish.len(), 2);
+    let p80 = orch.services[0]
+        .publish
+        .iter()
+        .find(|p| p.container == 80)
+        .unwrap();
+    assert_eq!(p80.host, 9090);
+    let p443 = orch.services[0]
+        .publish
+        .iter()
+        .find(|p| p.container == 443)
+        .unwrap();
+    assert_eq!(p443.host, 8443);
+}
+
+#[test]
+fn test_multifile__volume_merge_by_dest() {
+    let base = r#"
+SERVICE db
+  FROM postgres:15
+  VOLUME pgdata:/var/lib/postgresql/data
+  VOLUME ./config:/etc/postgresql
+    "#;
+    let overlay = r#"
+SERVICE db
+  VOLUME ./local-config:/etc/postgresql
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].volumes.len(), 2);
+    let etc = orch.services[0]
+        .volumes
+        .iter()
+        .find(|v| v.destination == "/etc/postgresql")
+        .unwrap();
+    assert_eq!(etc.source, "./local-config");
+    assert!(!etc.is_named);
+}
+
+#[test]
+fn test_multifile__requires_append_dedup() {
+    let base = r#"
+SERVICE db
+  FROM postgres:15
+
+SERVICE redis
+  FROM redis:7
+
+SERVICE cache
+  FROM memcached
+
+SERVICE web
+  FROM nginx
+  REQUIRES db redis
+    "#;
+    let overlay = r#"
+SERVICE web
+  REQUIRES redis cache
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    let web = orch.services.iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.requires, &["db", "redis", "cache"]);
+}
+
+#[test]
+fn test_multifile__clear_env() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+  ENV OLD_KEY=old_value
+  ENV KEEP=this
+    "#;
+    let overlay = r#"
+SERVICE web
+  CLEAR ENV
+  ENV FRESH=new_value
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert!(!orch.services[0].env.contains_key("OLD_KEY"));
+    assert!(!orch.services[0].env.contains_key("KEEP"));
+    assert_eq!(orch.services[0].env.get("FRESH").unwrap(), "new_value");
+}
+
+#[test]
+fn test_multifile__clear_requires() {
+    let base = r#"
+SERVICE db
+  FROM postgres:15
+
+SERVICE redis
+  FROM redis:7
+
+SERVICE cache
+  FROM memcached
+
+SERVICE web
+  FROM nginx
+  REQUIRES db redis
+    "#;
+    let overlay = r#"
+SERVICE web
+  CLEAR REQUIRES
+  REQUIRES cache
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    let web = orch.services.iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.requires, &["cache"]);
+}
+
+#[test]
+fn test_multifile__clear_publish() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+  PUBLISH 8080:80
+  PUBLISH 8443:443
+    "#;
+    let overlay = r#"
+SERVICE web
+  CLEAR PUBLISH
+  PUBLISH 9090:80
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].publish.len(), 1);
+    assert_eq!(orch.services[0].publish[0].host, 9090);
+    assert_eq!(orch.services[0].publish[0].container, 80);
+}
+
+#[test]
+fn test_multifile__mode_switch_from_to_run() {
+    let base = r#"
+SERVICE svc
+  FROM nginx:latest
+  ENTRYPOINT /docker-entrypoint.sh
+  PUBLISH 8080:80
+    "#;
+    let overlay = r#"
+SERVICE svc
+  RUN /usr/local/bin/myapp
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].mode, ServiceMode::Host);
+    assert_eq!(
+        orch.services[0].run_command.as_deref(),
+        Some("/usr/local/bin/myapp")
+    );
+    assert!(orch.services[0].image.is_none());
+    assert!(orch.services[0].entrypoint.is_none());
+    assert!(orch.services[0].publish.is_empty());
+}
+
+#[test]
+fn test_multifile__mode_switch_run_to_from() {
+    let base = r#"
+SERVICE svc
+  RUN /usr/local/bin/myapp
+  USER nobody
+  STOP kill $MAINPID
+    "#;
+    let overlay = r#"
+SERVICE svc
+  FROM myapp:latest
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].mode, ServiceMode::Container);
+    assert_eq!(orch.services[0].image.as_deref(), Some("myapp:latest"));
+    assert!(orch.services[0].run_command.is_none());
+    assert!(orch.services[0].user.is_none());
+    assert!(orch.services[0].stop_command.is_none());
+}
+
+#[test]
+fn test_multifile__new_service_in_overlay() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+    "#;
+    let overlay = r#"
+SERVICE cache
+  FROM redis:7
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services.len(), 2);
+    assert_eq!(orch.services[0].name, "web");
+    assert_eq!(orch.services[1].name, "cache");
+}
+
+#[test]
+fn test_multifile__arg_merge_and_expansion() {
+    let base = r#"
+ARG port=8080
+
+SERVICE web
+  FROM nginx
+  PUBLISH ${port}:80
+    "#;
+    let overlay = r#"
+ARG port=9090
+
+SERVICE web
+  ENV APP_PORT=${port}
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    // ARG last wins: port=9090
+    assert_eq!(orch.args.get("port").unwrap(), "9090");
+    assert_eq!(orch.services[0].publish[0].host, 9090);
+    assert_eq!(orch.services[0].env.get("APP_PORT").unwrap(), "9090");
+}
+
+#[test]
+fn test_multifile__arg_cli_override_across_files() {
+    let base = r#"
+ARG port=8080
+
+SERVICE web
+  FROM nginx
+  PUBLISH ${port}:80
+    "#;
+    let overlay = r#"
+ARG port=9090
+
+SERVICE web
+  ENV APP_PORT=${port}
+    "#;
+    let mut overrides = HashMap::new();
+    overrides.insert("port".to_string(), "3000".to_string());
+    let orch = parse_files_ok_with_args(
+        &[("base.orch", base), ("overlay.orch", overlay)],
+        &overrides,
+    );
+    // CLI override wins over all file defaults
+    assert_eq!(orch.services[0].publish[0].host, 3000);
+    assert_eq!(orch.services[0].env.get("APP_PORT").unwrap(), "3000");
+}
+
+#[test]
+fn test_multifile__three_files() {
+    let base = r#"
+ARG port=80
+
+SERVICE db
+  FROM postgres:15
+
+SERVICE web
+  FROM nginx:1.24
+  ENV MODE=prod
+  PUBLISH ${port}:80
+  REQUIRES db
+    "#;
+    let staging = r#"
+ARG port=8080
+SERVICE web
+  FROM nginx:1.25
+  ENV MODE=staging
+    "#;
+    let personal = r#"
+SERVICE web
+  ENV DEBUG=true
+  MEMORY 512M
+    "#;
+    let orch = parse_files_ok(&[
+        ("base.orch", base),
+        ("staging.orch", staging),
+        ("personal.orch", personal),
+    ]);
+    let web = orch.services.iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.image.as_deref(), Some("nginx:1.25"));
+    assert_eq!(web.env.get("MODE").unwrap(), "staging");
+    assert_eq!(web.env.get("DEBUG").unwrap(), "true");
+    assert_eq!(web.publish[0].host, 8080);
+    assert_eq!(web.resources.memory.as_deref(), Some("512M"));
+    assert_eq!(web.requires, &["db"]);
+}
+
+#[test]
+fn test_multifile__c1_violation_after_merge() {
+    // Base has FROM, overlay adds RUN without clearing FROM properly —
+    // Actually with mode switching, overlay RUN clears FROM. So both won't remain.
+    // This test verifies merge is correct: no C1 error.
+    let base = r#"
+SERVICE svc
+  FROM nginx
+    "#;
+    let overlay = r#"
+SERVICE svc
+  RUN /usr/bin/myapp
+    "#;
+    let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert_eq!(orch.services[0].mode, ServiceMode::Host);
+}
+
+#[test]
+fn test_multifile__c4_cycle_across_files() {
+    let base = r#"
+SERVICE a
+  FROM nginx
+  REQUIRES b
+    "#;
+    let overlay = r#"
+SERVICE b
+  FROM nginx
+  REQUIRES a
+    "#;
+    let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
+    let cycle_err = errors.iter().any(|e| format!("{}", e).contains("cycle"));
+    assert!(cycle_err, "expected cycle error, got: {:?}", errors);
+}
+
+#[test]
+fn test_multifile__syntax_error_in_overlay() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+    "#;
+    let overlay = r#"
+SERVICE web
+  PUBLISH bad_format
+    "#;
+    let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn test_multifile__clear_error_on_scalar() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+    "#;
+    let overlay = r#"
+SERVICE web
+  CLEAR FROM
+    "#;
+    let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
+    let has_clear_err = errors
+        .iter()
+        .any(|e| format!("{}", e).contains("CLEAR cannot target scalar"));
+    assert!(
+        has_clear_err,
+        "expected CLEAR scalar error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_multifile__clear_unknown_directive() {
+    let base = r#"
+SERVICE web
+  FROM nginx
+    "#;
+    let overlay = r#"
+SERVICE web
+  CLEAR BANANA
+    "#;
+    let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
+    let has_err = errors
+        .iter()
+        .any(|e| format!("{}", e).contains("unknown directive"));
+    assert!(
+        has_err,
+        "expected unknown directive error, got: {:?}",
+        errors
+    );
 }

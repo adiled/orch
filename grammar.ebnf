@@ -10,6 +10,15 @@ directive   ::= mode_directive
               | container_directive
               | host_directive
               | common_directive
+              | clear_directive
+
+/* Overlay composition - resets a list-type directive before merge */
+clear_directive
+            ::= 'CLEAR' ws clearable_target
+
+clearable_target
+            ::= 'ENV' | 'ENV_FILE' | 'PUBLISH' | 'VOLUME'
+              | 'REQUIRES' | 'AFTER'
 
 /* Execution mode - mutually exclusive per service */
 mode_directive

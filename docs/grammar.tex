@@ -117,6 +117,18 @@ directive    ::= mode_directive
                | container_directive
                | host_directive
                | common_directive
+               | clear_directive
+\end{lstlisting}
+
+\subsubsection{Overlay Composition}
+
+\begin{lstlisting}
+clear_directive
+             ::= 'CLEAR' ws clearable_target
+
+clearable_target
+             ::= 'ENV' | 'ENV_FILE' | 'PUBLISH' | 'VOLUME'
+               | 'REQUIRES' | 'AFTER'
 \end{lstlisting}
 
 \subsubsection{Execution Mode (mutually exclusive per service)}
@@ -519,6 +531,41 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \node[rr terminal,join] {\}};
   \node[rr point,join] {};
 \end{tikzpicture}
+
+% --- clear_directive ---
+\noindent\textbf{clear\_directive}
+\medskip
+
+\begin{tikzpicture}[node distance=5mm and 4mm]
+  \node[rr point] (start) {};
+  \node[rr terminal,right=8mm of start] (clear) {CLEAR};
+
+  \node[rr terminal,right=12mm of clear] (env) {ENV};
+  \node[rr terminal,below=7mm of env] (envf) {ENV\_FILE};
+  \node[rr terminal,below=7mm of envf] (pub) {PUBLISH};
+  \node[rr terminal,below=7mm of pub] (vol) {VOLUME};
+  \node[rr terminal,below=7mm of vol] (req) {REQUIRES};
+  \node[rr terminal,below=7mm of req] (aft) {AFTER};
+
+  \node[rr point,right=8mm of env] (end) {};
+
+  \draw[rr arrow] (start) -- (clear);
+  \draw[rr arrow] (clear) -- (env);
+  \draw[rr line] (env) -- (end);
+
+  \draw[rr line,rounded corners] (clear.east) |- (envf.west);
+  \draw[rr line,rounded corners] (envf.east) -| (end.south);
+  \draw[rr line,rounded corners] (clear.east) |- (pub.west);
+  \draw[rr line,rounded corners] (pub.east) -| (end.south);
+  \draw[rr line,rounded corners] (clear.east) |- (vol.west);
+  \draw[rr line,rounded corners] (vol.east) -| (end.south);
+  \draw[rr line,rounded corners] (clear.east) |- (req.west);
+  \draw[rr line,rounded corners] (req.east) -| (end.south);
+  \draw[rr line,rounded corners] (clear.east) |- (aft.west);
+  \draw[rr line,rounded corners] (aft.east) -| (end.south);
+\end{tikzpicture}
+
+\bigskip
 
 % ============================================================================
 \newpage
