@@ -177,6 +177,16 @@ impl Service {
             logging: LogConfig::default(),
         }
     }
+
+    /// Returns true if this service runs directly on the host (not in a container).
+    pub fn is_host(&self) -> bool {
+        self.mode == ServiceMode::Host
+    }
+
+    /// Returns true if this service runs in a container.
+    pub fn is_container(&self) -> bool {
+        self.mode == ServiceMode::Container
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
