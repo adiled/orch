@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::types::{ClearableMap, ClearableVec, RawOrchFile, RawService};
+use orch::types::{ClearableMap, ClearableVec, RawOrchFile, RawService};
 
 /// Merge multiple raw Orchfile representations left-to-right.
 ///

@@ -2,7 +2,6 @@ mod error;
 mod merge;
 mod parser;
 mod resolve;
-mod types;
 
 use std::collections::HashMap;
 use std::env;

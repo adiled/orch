@@ -1,14 +1,14 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceMode {
     Container,
     Host,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RestartPolicy {
     No,
@@ -22,7 +22,7 @@ impl Default for RestartPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RecreatePolicy {
     Always,
@@ -35,20 +35,20 @@ impl Default for RecreatePolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMapping {
     pub host: u16,
     pub container: u16,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeMount {
     pub source: String,
     pub destination: String,
     pub is_named: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResourceLimits {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
@@ -66,7 +66,7 @@ pub struct ResourceLimits {
     pub io_weight: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RestartConfig {
     pub policy: RestartPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,7 +77,7 @@ pub struct RestartConfig {
     pub start_limit_interval: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TimeoutConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
@@ -85,7 +85,7 @@ pub struct TimeoutConfig {
     pub stop: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LogConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
@@ -93,7 +93,7 @@ pub struct LogConfig {
     pub stderr: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {
     pub name: String,
     pub mode: ServiceMode,
@@ -107,9 +107,9 @@ pub struct Service {
     pub entrypoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cmd: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publish: Vec<PortMapping>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<VolumeMount>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,14 +121,14 @@ pub struct Service {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_files: Vec<String>,
 
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,10 +179,12 @@ impl Service {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchFile {
     pub version: String,
+    #[serde(default)]
     pub args: HashMap<String, String>,
+    #[serde(default)]
     pub services: Vec<Service>,
 }
 

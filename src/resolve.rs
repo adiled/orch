@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{OrchError, ValidationError};
-use crate::types::*;
+use orch::types::*;
 
 /// Resolve a merged RawOrchFile into a final OrchFile.
 ///

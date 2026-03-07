@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::error::{OrchError, ParseError};
-use crate::types::*;
+use orch::types::*;
 
 /// Validate a service name per spec: lowercase alphanumeric + hyphens,
 /// starts with letter, max 63 chars.

@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use crate::merge::merge;
-use crate::types::{RawOrchFile, RawService, Source};
+use orch::types::{RawOrchFile, RawService, Source};
 
 // ---------------------------------------------------------------------------
 // Helpers
