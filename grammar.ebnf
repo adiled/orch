@@ -1,8 +1,9 @@
 orchfile    ::= ( line newline )*
-line        ::= blank | comment | arg | service_decl | directive
+line        ::= blank | comment | version | arg | service_decl | directive
 blank       ::= ws*
 comment     ::= ws* '#' any*
 
+version     ::= 'ORCH_VERSION' ws version_number
 arg         ::= 'ARG' ws identifier '=' value
 service_decl ::= 'SERVICE' ws service_name
 
@@ -29,7 +30,7 @@ mode_directive
 container_directive
             ::= 'ENTRYPOINT' ws command_string
               | 'CMD' ws command_string
-              | 'PUBLISH' ws port ':' port
+              | 'PUBLISH' ws ( host_address ':' )? port ':' port
               | 'VOLUME' ws volume_source ':' path
 
 /* Host-only */
@@ -120,6 +121,8 @@ percentage  ::= integer '%'
 number      ::= integer ( '.' digit+ )?
 integer     ::= digit+
 port        ::= digit+   /* 1-65535 */
+version_number ::= integer '.' integer '.' integer
+host_address ::= ( letter | digit | '.' | ':' )+   /* IPv4, IPv6, or hostname */
 
 letter      ::= [a-z]
 digit       ::= [0-9]

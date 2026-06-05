@@ -45,7 +45,7 @@ pub fn resolve(
 
     // Step 7: C4 - DAG acyclicity
     let orch = OrchFile {
-        version: "0.2.0".to_string(),
+        version: SPEC_VERSION.to_string(),
         args,
         services,
     };
@@ -127,11 +127,21 @@ fn resolve_service(
 
     // Expand and parse PUBLISH
     let mut publish: Vec<PortMapping> = Vec::new();
-    for (host_raw, container_raw) in &raw.publish.values {
+    for (addr_raw, host_raw, container_raw) in &raw.publish.values {
+        let addr_str = expand_vars(addr_raw, args);
         let host_str = expand_vars(host_raw, args);
         let container_str = expand_vars(container_raw, args);
+        let address = if addr_str.is_empty() {
+            None
+        } else {
+            Some(addr_str)
+        };
         match (host_str.parse::<u16>(), container_str.parse::<u16>()) {
-            (Ok(host), Ok(container)) => publish.push(PortMapping { host, container }),
+            (Ok(host), Ok(container)) => publish.push(PortMapping {
+                address,
+                host,
+                container,
+            }),
             (Err(_), _) => {
                 errors.push(
                     ValidationError::new(

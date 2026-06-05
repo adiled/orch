@@ -63,6 +63,8 @@ ORCH_ARG_postgres_port=9999 orch parse Orchfile
 ## Example Orchfile
 
 ```
+ORCH_VERSION 0.2.1
+
 ARG postgres_port=5433
 ARG django_port=9090
 
@@ -91,7 +93,7 @@ orch parse Orchfile
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "0.2.1",
   "args": {
     "postgres_port": "5433",
     "django_port": "9090"

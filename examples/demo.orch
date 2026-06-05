@@ -1,5 +1,7 @@
 # Example Orchfile for a typical Django + Postgres + Redis stack
 
+ORCH_VERSION 0.2.1
+
 ARG postgres_port=5433
 ARG postgres_memory=4G
 ARG django_port=9090
@@ -20,7 +22,7 @@ SERVICE redis
 FROM redis:6.2.0-alpine
 MEMORY 1G
 CPUS 1
-PUBLISH 6380:6379
+PUBLISH 127.0.0.1:6380:6379
 RECREATE always
 HEALTHCHECK redis-cli -h localhost -p 6380 ping
 RESTART always

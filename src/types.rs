@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The Orchfile spec version this parser implements (mirrors the package version).
+pub const SPEC_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceMode {
@@ -37,6 +40,9 @@ impl Default for RecreatePolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMapping {
+    /// Optional host bind address (e.g. `127.0.0.1`). `None` binds all interfaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     pub host: u16,
     pub container: u16,
 }
@@ -201,7 +207,7 @@ pub struct OrchFile {
 impl OrchFile {
     pub fn new() -> Self {
         OrchFile {
-            version: "0.2.0".to_string(),
+            version: SPEC_VERSION.to_string(),
             args: HashMap::new(),
             services: Vec::new(),
         }
@@ -294,7 +300,7 @@ pub struct RawService {
     pub cmd: Option<String>,
 
     // Container-only keyed lists (key: container_port / destination)
-    pub publish: ClearableVec<(String, String)>, // (host_raw, container_raw)
+    pub publish: ClearableVec<(String, String, String)>, // (address_raw, host_port_raw, container_port_raw)
     pub volumes: ClearableVec<(String, String)>, // (source_raw, dest_raw)
 
     // Host-only scalars
