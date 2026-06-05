@@ -1,5 +1,6 @@
 # Orchfile Specification
 
+**Version**: 0.2.1  
 **Target**: Local, ephemeral, development, and staging environments  
 **Not for**: Production deployments at scale
 
@@ -79,6 +80,16 @@ Service dependencies defined by `REQUIRES` and `AFTER` MUST form a directed acyc
 ## Directives Reference
 
 ### Global Directives
+
+#### ORCH_VERSION
+
+Asserts the Orchfile spec version the file targets. Optional, but if present it must be the first directive and appear before any `SERVICE`. A version that the parser does not support is a parse error.
+
+```
+ORCH_VERSION 0.2.1
+```
+
+When omitted, the file is assumed to target the parser's current spec version. In multi-file composition, any file may declare it.
 
 #### ARG
 
@@ -166,14 +177,17 @@ CMD -g 'daemon off;'
 
 #### PUBLISH
 
-Map host port to container port.
+Map host port to container port, optionally bound to a specific host address.
 
 ```
 PUBLISH 5433:5432
 PUBLISH 8080:80
+PUBLISH 127.0.0.1:8080:80
 ```
 
-**Format**: `host_port:container_port`
+**Format**: `[address:]host_port:container_port`
+
+**Host address**: Optional. When given, the published port binds only to that address (e.g. `127.0.0.1`); when omitted, the platform default applies (typically all interfaces). IPv4, IPv6, and hostnames are accepted.
 
 **Multiple allowed**: Specify multiple PUBLISH directives for multiple port mappings.
 
@@ -676,7 +690,7 @@ SERVICE web
 #### Keyed Lists: Merge by Key
 
 - **ENV**: Merged by variable name (overlay wins on conflict)
-- **PUBLISH**: Merged by container port (overlay replaces host port for same container port)
+- **PUBLISH**: Merged by container port (overlay replaces host address and port for same container port)
 - **VOLUME**: Merged by destination path (overlay replaces source for same destination)
 
 ```

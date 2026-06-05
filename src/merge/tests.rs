@@ -201,32 +201,32 @@ fn test_merge__publish_merge_by_container_port() {
     let mut s1 = svc_with_from("web", "nginx", 0);
     s1.publish
         .values
-        .push(("8080".to_string(), "80".to_string()));
+        .push(("".to_string(), "8080".to_string(), "80".to_string()));
     s1.publish
         .values
-        .push(("8443".to_string(), "443".to_string()));
+        .push(("".to_string(), "8443".to_string(), "443".to_string()));
 
     let mut s2 = raw_svc("web", 1);
     s2.publish
         .values
-        .push(("9090".to_string(), "80".to_string())); // override port 80
+        .push(("".to_string(), "9090".to_string(), "80".to_string())); // override port 80
     s2.publish
         .values
-        .push(("3000".to_string(), "3000".to_string())); // new
+        .push(("".to_string(), "3000".to_string(), "3000".to_string())); // new
 
     let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
     let pubs = &result.services[0].publish.values;
 
     assert_eq!(pubs.len(), 3);
     // Port 80: overridden host from 8080 to 9090
-    let p80 = pubs.iter().find(|(_, c)| c == "80").unwrap();
-    assert_eq!(p80.0, "9090");
+    let p80 = pubs.iter().find(|(_, _, c)| c == "80").unwrap();
+    assert_eq!(p80.1, "9090");
     // Port 443: unchanged
-    let p443 = pubs.iter().find(|(_, c)| c == "443").unwrap();
-    assert_eq!(p443.0, "8443");
+    let p443 = pubs.iter().find(|(_, _, c)| c == "443").unwrap();
+    assert_eq!(p443.1, "8443");
     // Port 3000: new
-    let p3000 = pubs.iter().find(|(_, c)| c == "3000").unwrap();
-    assert_eq!(p3000.0, "3000");
+    let p3000 = pubs.iter().find(|(_, _, c)| c == "3000").unwrap();
+    assert_eq!(p3000.1, "3000");
 }
 
 #[test]
@@ -234,20 +234,20 @@ fn test_merge__publish_clear_then_add() {
     let mut s1 = svc_with_from("web", "nginx", 0);
     s1.publish
         .values
-        .push(("8080".to_string(), "80".to_string()));
+        .push(("".to_string(), "8080".to_string(), "80".to_string()));
 
     let mut s2 = raw_svc("web", 1);
     s2.publish.cleared = true;
     s2.publish
         .values
-        .push(("9090".to_string(), "80".to_string()));
+        .push(("".to_string(), "9090".to_string(), "80".to_string()));
 
     let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
     let pubs = &result.services[0].publish.values;
 
     assert_eq!(pubs.len(), 1);
-    assert_eq!(pubs[0].0, "9090");
-    assert_eq!(pubs[0].1, "80");
+    assert_eq!(pubs[0].1, "9090");
+    assert_eq!(pubs[0].2, "80");
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +349,7 @@ fn test_merge__switch_to_host_clears_container_directives() {
     s1.cmd = Some("nginx -g 'daemon off;'".to_string());
     s1.publish
         .values
-        .push(("8080".to_string(), "80".to_string()));
+        .push(("".to_string(), "8080".to_string(), "80".to_string()));
     s1.volumes
         .values
         .push(("./html".to_string(), "/usr/share/nginx/html".to_string()));
@@ -469,7 +469,9 @@ fn test_merge__single_file_identity() {
 fn test_merge__three_file_cascade() {
     let mut s1 = svc_with_from("web", "nginx:1.24", 0);
     s1.env.values.insert("MODE".to_string(), "prod".to_string());
-    s1.publish.values.push(("80".to_string(), "80".to_string()));
+    s1.publish
+        .values
+        .push(("".to_string(), "80".to_string(), "80".to_string()));
     s1.requires.values.push("db".to_string());
 
     let mut s2 = raw_svc("web", 1);
@@ -480,7 +482,7 @@ fn test_merge__three_file_cascade() {
         .insert("MODE".to_string(), "staging".to_string());
     s2.publish
         .values
-        .push(("8080".to_string(), "80".to_string())); // override host for port 80
+        .push(("".to_string(), "8080".to_string(), "80".to_string())); // override host for port 80
 
     let mut s3 = raw_svc("web", 2);
     s3.env
@@ -500,8 +502,8 @@ fn test_merge__three_file_cascade() {
     assert_eq!(svc.env.values.get("DEBUG").unwrap(), "true");
     // Port 80 host overridden to 8080
     assert_eq!(svc.publish.values.len(), 1);
-    assert_eq!(svc.publish.values[0].0, "8080");
-    assert_eq!(svc.publish.values[0].1, "80");
+    assert_eq!(svc.publish.values[0].1, "8080");
+    assert_eq!(svc.publish.values[0].2, "80");
     // Requires: db + cache (deduped)
     assert_eq!(svc.requires.values, &["db", "cache"]);
 }

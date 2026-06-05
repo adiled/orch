@@ -806,7 +806,7 @@ ONESHOT true
 fn test_json_serialization() {
     let orch = parse_ok("SERVICE db\nFROM postgres:15\nPUBLISH 5432:5432\n");
     let json = serde_json::to_string_pretty(&orch).unwrap();
-    assert!(json.contains("\"version\": \"0.2.0\""));
+    assert!(json.contains("\"version\": \"0.2.1\""));
     assert!(json.contains("\"name\": \"db\""));
     assert!(json.contains("\"mode\": \"container\""));
     assert!(json.contains("\"host\": 5432"));
@@ -1306,4 +1306,110 @@ SERVICE web
         "expected unknown directive error, got: {:?}",
         errors
     );
+}
+
+// =========================================================================
+// ORCH_VERSION directive
+// =========================================================================
+
+#[test]
+fn test_orch_version__matching_is_accepted() {
+    let input = format!(
+        "ORCH_VERSION {}\nSERVICE db\nFROM postgres:15\n",
+        orch::types::SPEC_VERSION
+    );
+    let orch = parse_ok(&input);
+    assert_eq!(orch.version, orch::types::SPEC_VERSION);
+}
+
+#[test]
+fn test_orch_version__mismatch_is_rejected() {
+    let errors = parse_err("ORCH_VERSION 9.9.9\nSERVICE db\nFROM img\n");
+    let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+    assert!(msgs.iter().any(|m| m.contains("unsupported Orchfile version '9.9.9'")));
+}
+
+#[test]
+fn test_orch_version__must_precede_service() {
+    let input = format!(
+        "SERVICE db\nFROM img\nORCH_VERSION {}\n",
+        orch::types::SPEC_VERSION
+    );
+    let errors = parse_err(&input);
+    let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+    assert!(msgs.iter().any(|m| m.contains("must appear before any SERVICE")));
+}
+
+#[test]
+fn test_orch_version__duplicate_is_rejected() {
+    let v = orch::types::SPEC_VERSION;
+    let input = format!("ORCH_VERSION {v}\nORCH_VERSION {v}\nSERVICE db\nFROM img\n");
+    let errors = parse_err(&input);
+    let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+    assert!(msgs.iter().any(|m| m.contains("duplicate ORCH_VERSION")));
+}
+
+#[test]
+fn test_orch_version__requires_value() {
+    let errors = parse_err("ORCH_VERSION\nSERVICE db\nFROM img\n");
+    let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+    assert!(msgs.iter().any(|m| m.contains("ORCH_VERSION requires a version value")));
+}
+
+#[test]
+fn test_orch_version__absent_defaults_to_spec_version() {
+    let orch = parse_ok("SERVICE db\nFROM img\n");
+    assert_eq!(orch.version, orch::types::SPEC_VERSION);
+}
+
+// =========================================================================
+// PUBLISH optional host address
+// =========================================================================
+
+#[test]
+fn test_publish__no_address_yields_none() {
+    let orch = parse_ok("SERVICE x\nFROM img\nPUBLISH 8080:80\n");
+    let p = &orch.services[0].publish[0];
+    assert_eq!(p.address, None);
+    assert_eq!(p.host, 8080);
+    assert_eq!(p.container, 80);
+}
+
+#[test]
+fn test_publish__with_host_address() {
+    let orch = parse_ok("SERVICE x\nFROM img\nPUBLISH 127.0.0.1:8080:80\n");
+    let p = &orch.services[0].publish[0];
+    assert_eq!(p.address.as_deref(), Some("127.0.0.1"));
+    assert_eq!(p.host, 8080);
+    assert_eq!(p.container, 80);
+}
+
+#[test]
+fn test_publish__ipv6_host_address() {
+    let orch = parse_ok("SERVICE x\nFROM img\nPUBLISH ::1:8080:80\n");
+    let p = &orch.services[0].publish[0];
+    assert_eq!(p.address.as_deref(), Some("::1"));
+    assert_eq!(p.host, 8080);
+    assert_eq!(p.container, 80);
+}
+
+#[test]
+fn test_publish__address_expands_vars() {
+    let input = "ARG ip=127.0.0.1\nSERVICE x\nFROM img\nPUBLISH ${ip}:8080:80\n";
+    let orch = parse_ok(input);
+    assert_eq!(orch.services[0].publish[0].address.as_deref(), Some("127.0.0.1"));
+}
+
+#[test]
+fn test_publish__address_omitted_from_json_when_none() {
+    let orch = parse_ok("SERVICE x\nFROM img\nPUBLISH 8080:80\n");
+    let json = serde_json::to_string(&orch).unwrap();
+    assert!(!json.contains("address"));
+}
+
+#[test]
+fn test_publish__address_present_in_json() {
+    let orch = parse_ok("SERVICE x\nFROM img\nPUBLISH 127.0.0.1:8080:80\n");
+    let json = serde_json::to_string(&orch).unwrap();
+    assert!(json.contains("\"address\":\"127.0.0.1\""));
 }

@@ -110,11 +110,11 @@ fn merge_service(base: &mut RawService, overlay: RawService) {
     // Keyed map: ENV (merge by var name)
     merge_keyed_map(&mut base.env, overlay.env);
 
-    // Keyed list: PUBLISH (merge by container port — second element)
-    merge_keyed_vec(&mut base.publish, overlay.publish, 1);
+    // Keyed list: PUBLISH (merge by container port — third element)
+    merge_keyed_vec(&mut base.publish, overlay.publish, |e| e.2.as_str());
 
     // Keyed list: VOLUME (merge by destination — second element)
-    merge_keyed_vec(&mut base.volumes, overlay.volumes, 1);
+    merge_keyed_vec(&mut base.volumes, overlay.volumes, |e| e.1.as_str());
 
     // Positional lists: append + dedup
     merge_positional(&mut base.requires, overlay.requires);
@@ -156,25 +156,22 @@ fn merge_keyed_map(base: &mut ClearableMap, overlay: ClearableMap) {
     }
 }
 
-/// Keyed vec merge (PUBLISH, VOLUME): merge by element at `key_index`.
-/// If cleared, discard base values first.
-fn merge_keyed_vec(
-    base: &mut ClearableVec<(String, String)>,
-    overlay: ClearableVec<(String, String)>,
-    key_index: usize,
-) {
+/// Keyed vec merge (PUBLISH, VOLUME): merge by the key produced by `key_of`.
+/// If cleared, discard base values first; otherwise overlay entries replace
+/// base entries with the same key, and new keys are appended.
+fn merge_keyed_vec<T, F>(base: &mut ClearableVec<T>, overlay: ClearableVec<T>, key_of: F)
+where
+    F: Fn(&T) -> &str,
+{
     if overlay.cleared {
         base.values.clear();
     }
 
     for entry in overlay.values {
-        let key = if key_index == 0 { &entry.0 } else { &entry.1 };
+        let key = key_of(&entry).to_string();
 
         // Find and replace existing entry with same key, or append
-        if let Some(existing) = base.values.iter_mut().find(|e| {
-            let existing_key = if key_index == 0 { &e.0 } else { &e.1 };
-            existing_key == key
-        }) {
+        if let Some(existing) = base.values.iter_mut().find(|e| key_of(e) == key) {
             *existing = entry;
         } else {
             base.values.push(entry);

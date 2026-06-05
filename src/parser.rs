@@ -99,6 +99,7 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
     let mut errors: Vec<OrchError> = Vec::new();
     let mut current_service: Option<RawService> = None;
     let mut seen_service_names: HashMap<String, usize> = HashMap::new();
+    let mut orch_version_line: Option<usize> = None;
 
     // Pass 1: collect ARG defaults (no override application — deferred to resolve)
     for (line_num_0, raw_line) in input.lines().enumerate() {
@@ -140,6 +141,49 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
         let (directive, value) = split_directive(line);
 
         if directive == "ARG" {
+            continue;
+        }
+
+        // ORCH_VERSION: file-global, must precede any SERVICE, asserts spec compatibility.
+        if directive == "ORCH_VERSION" {
+            if current_service.is_some() || !services.is_empty() {
+                errors.push(
+                    ParseError::new(line_num, "ORCH_VERSION must appear before any SERVICE").into(),
+                );
+                continue;
+            }
+            if let Some(prev) = orch_version_line {
+                errors.push(
+                    ParseError::new(
+                        line_num,
+                        format!("duplicate ORCH_VERSION directive (first defined at line {})", prev),
+                    )
+                    .into(),
+                );
+                continue;
+            }
+            orch_version_line = Some(line_num);
+            match value {
+                Some(v) if !v.is_empty() => {
+                    if v != SPEC_VERSION {
+                        errors.push(
+                            ParseError::new(
+                                line_num,
+                                format!(
+                                    "unsupported Orchfile version '{}' (this parser supports {})",
+                                    v, SPEC_VERSION
+                                ),
+                            )
+                            .into(),
+                        );
+                    }
+                }
+                _ => {
+                    errors.push(
+                        ParseError::new(line_num, "ORCH_VERSION requires a version value").into(),
+                    );
+                }
+            }
             continue;
         }
 
@@ -354,23 +398,25 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
                     .push(("PUBLISH".to_string(), line_num, file_index));
                 let val = require_raw_value(&raw_val, "PUBLISH", line_num, &mut errors);
                 if let Some(v) = val {
-                    // Validate format (has colon) but store raw strings
+                    // `[address:]host_port:container_port`. Last two groups are
+                    // the ports; rsplit keeps ':'-bearing addresses (IPv6) intact.
                     let parts: Vec<&str> = v.split(':').collect();
-                    if parts.len() != 2 {
+                    if parts.len() < 2 {
                         errors.push(
                             ParseError::new(
                                 line_num,
                                 format!(
-                                    "invalid PUBLISH format '{}', expected host_port:container_port",
+                                    "invalid PUBLISH format '{}', expected [address:]host_port:container_port",
                                     v
                                 ),
                             )
                             .into(),
                         );
                     } else {
-                        svc.publish
-                            .values
-                            .push((parts[0].to_string(), parts[1].to_string()));
+                        let container = parts[parts.len() - 1].to_string();
+                        let host_port = parts[parts.len() - 2].to_string();
+                        let address = parts[..parts.len() - 2].join(":");
+                        svc.publish.values.push((address, host_port, container));
                     }
                 }
             }
