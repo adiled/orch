@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{OrchError, ValidationError};
-use orch::types::*;
+use crate::types::*;
 
 /// Resolve a merged RawOrchFile into a final OrchFile.
 ///
@@ -45,7 +45,7 @@ pub fn resolve(
 
     // Step 7: C4 - DAG acyclicity
     let orch = OrchFile {
-        version: SPEC_VERSION.to_string(),
+        version: ORCH_VERSION.to_string(),
         args,
         services,
     };

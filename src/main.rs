@@ -1,8 +1,3 @@
-mod error;
-mod merge;
-mod parser;
-mod resolve;
-
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -127,16 +122,11 @@ fn main() {
         }
     }
 
-    // Build refs for parse_files
-    let files: Vec<(&str, &str)> = file_contents
-        .iter()
-        .map(|(name, content)| (name.as_str(), content.as_str()))
-        .collect();
-
-    let result = if files.len() == 1 {
-        parser::parse(&files[0].1, &overrides)
+    let result = if file_contents.len() == 1 {
+        // Single file: omit the filename from error locations (just "line N").
+        orch::parser::parse(&file_contents[0].1, &overrides)
     } else {
-        parser::parse_files(&files, &overrides)
+        orch::parse_files(&file_contents, &overrides)
     };
 
     match command.as_str() {

@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// The Orchfile spec version this parser implements (mirrors the package version).
-pub const SPEC_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The Orchfile **spec** version this parser implements.
+///
+/// This is the version of the Orchfile specification that the `ORCH_VERSION`
+/// directive declares and is validated against, independent of the `orch`
+/// library/CLI crate version in `Cargo.toml`. The spec and the tooling evolve
+/// on separate tracks.
+pub const ORCH_VERSION: &str = "1.0.0-rc";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -207,7 +212,7 @@ pub struct OrchFile {
 impl OrchFile {
     pub fn new() -> Self {
         OrchFile {
-            version: SPEC_VERSION.to_string(),
+            version: ORCH_VERSION.to_string(),
             args: HashMap::new(),
             services: Vec::new(),
         }
