@@ -1,6 +1,6 @@
 # Orchfile Specification
 
-**Version**: 0.2.1  
+**Version**: 1.0.0-rc  
 **Target**: Local, ephemeral, development, and staging environments  
 **Not for**: Production deployments at scale
 
@@ -86,10 +86,12 @@ Service dependencies defined by `REQUIRES` and `AFTER` MUST form a directed acyc
 Asserts the Orchfile spec version the file targets. Optional, but if present it must be the first directive and appear before any `SERVICE`. A version that the parser does not support is a parse error.
 
 ```
-ORCH_VERSION 0.2.1
+ORCH_VERSION 1.0.0-rc
 ```
 
 When omitted, the file is assumed to target the parser's current spec version. In multi-file composition, any file may declare it.
+
+This is the version of the **Orchfile specification** (currently `1.0.0-rc`), which evolves independently of the `orch` library/CLI release version.
 
 #### ARG
 

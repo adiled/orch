@@ -806,7 +806,7 @@ ONESHOT true
 fn test_json_serialization() {
     let orch = parse_ok("SERVICE db\nFROM postgres:15\nPUBLISH 5432:5432\n");
     let json = serde_json::to_string_pretty(&orch).unwrap();
-    assert!(json.contains("\"version\": \"0.2.1\""));
+    assert!(json.contains("\"version\": \"1.0.0-rc\""));
     assert!(json.contains("\"name\": \"db\""));
     assert!(json.contains("\"mode\": \"container\""));
     assert!(json.contains("\"host\": 5432"));
@@ -1316,10 +1316,10 @@ SERVICE web
 fn test_orch_version__matching_is_accepted() {
     let input = format!(
         "ORCH_VERSION {}\nSERVICE db\nFROM postgres:15\n",
-        orch::types::SPEC_VERSION
+        crate::types::ORCH_VERSION
     );
     let orch = parse_ok(&input);
-    assert_eq!(orch.version, orch::types::SPEC_VERSION);
+    assert_eq!(orch.version, crate::types::ORCH_VERSION);
 }
 
 #[test]
@@ -1333,7 +1333,7 @@ fn test_orch_version__mismatch_is_rejected() {
 fn test_orch_version__must_precede_service() {
     let input = format!(
         "SERVICE db\nFROM img\nORCH_VERSION {}\n",
-        orch::types::SPEC_VERSION
+        crate::types::ORCH_VERSION
     );
     let errors = parse_err(&input);
     let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
@@ -1342,7 +1342,7 @@ fn test_orch_version__must_precede_service() {
 
 #[test]
 fn test_orch_version__duplicate_is_rejected() {
-    let v = orch::types::SPEC_VERSION;
+    let v = crate::types::ORCH_VERSION;
     let input = format!("ORCH_VERSION {v}\nORCH_VERSION {v}\nSERVICE db\nFROM img\n");
     let errors = parse_err(&input);
     let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
@@ -1359,7 +1359,7 @@ fn test_orch_version__requires_value() {
 #[test]
 fn test_orch_version__absent_defaults_to_spec_version() {
     let orch = parse_ok("SERVICE db\nFROM img\n");
-    assert_eq!(orch.version, orch::types::SPEC_VERSION);
+    assert_eq!(orch.version, crate::types::ORCH_VERSION);
 }
 
 // =========================================================================

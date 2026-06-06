@@ -121,7 +121,8 @@ percentage  ::= integer '%'
 number      ::= integer ( '.' digit+ )?
 integer     ::= digit+
 port        ::= digit+   /* 1-65535 */
-version_number ::= integer '.' integer '.' integer
+version_number ::= integer '.' integer '.' integer ( '-' prerelease )?
+prerelease  ::= ( letter | digit | '-' | '.' )+   /* e.g. rc, beta.1 */
 host_address ::= ( letter | digit | '.' | ':' )+   /* IPv4, IPv6, or hostname */
 
 letter      ::= [a-z]

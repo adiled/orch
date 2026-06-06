@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::error::{OrchError, ParseError};
-use orch::types::*;
+use crate::types::*;
 
 /// Validate a service name per spec: lowercase alphanumeric + hyphens,
 /// starts with letter, max 63 chars.
@@ -165,13 +165,13 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
             orch_version_line = Some(line_num);
             match value {
                 Some(v) if !v.is_empty() => {
-                    if v != SPEC_VERSION {
+                    if v != ORCH_VERSION {
                         errors.push(
                             ParseError::new(
                                 line_num,
                                 format!(
                                     "unsupported Orchfile version '{}' (this parser supports {})",
-                                    v, SPEC_VERSION
+                                    v, ORCH_VERSION
                                 ),
                             )
                             .into(),
