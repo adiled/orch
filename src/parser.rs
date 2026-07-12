@@ -86,7 +86,7 @@ pub fn parse_files(
 
 /// The set of directive names that CLEAR can target (list-type directives).
 const CLEARABLE_DIRECTIVES: &[&str] =
-    &["ENV", "ENV_FILE", "PUBLISH", "VOLUME", "REQUIRES", "AFTER"];
+    &["ENV", "ENV_FILE", "PUBLISH", "VOLUME", "REQUIRES", "AFTER", "SECRET"];
 
 /// Parse an Orchfile into a raw (unexpanded) intermediate representation.
 ///
@@ -95,6 +95,9 @@ const CLEARABLE_DIRECTIVES: &[&str] =
 /// duplicates) are still caught.
 pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<OrchError>> {
     let mut args: HashMap<String, String> = HashMap::new();
+    // RFC 0001 file-global state declarations
+    let mut machine_states: Vec<String> = Vec::new();
+    let mut default_state: Option<String> = None;
     let mut services: Vec<RawService> = Vec::new();
     let mut errors: Vec<OrchError> = Vec::new();
     let mut current_service: Option<RawService> = None;
@@ -141,6 +144,49 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
         let (directive, value) = split_directive(line);
 
         if directive == "ARG" {
+            continue;
+        }
+
+        // RFC 0001: File-global machine state declarations
+        if directive == "MACHINE_STATES" {
+            if current_service.is_some() || !services.is_empty() {
+                errors.push(
+                    ParseError::new(line_num, "MACHINE_STATES must appear before any SERVICE").into(),
+                );
+                continue;
+            }
+            match value {
+                Some(v) if !v.is_empty() => {
+                    for state in v.split_whitespace() {
+                        machine_states.push(state.to_string());
+                    }
+                }
+                _ => {
+                    errors.push(
+                        ParseError::new(line_num, "MACHINE_STATES requires states").into(),
+                    );
+                }
+            }
+            continue;
+        }
+
+        if directive == "DEFAULT_STATE" {
+            if current_service.is_some() || !services.is_empty() {
+                errors.push(
+                    ParseError::new(line_num, "DEFAULT_STATE must appear before any SERVICE").into(),
+                );
+                continue;
+            }
+            match value {
+                Some(v) if !v.is_empty() => {
+                    default_state = Some(v.to_string());
+                }
+                _ => {
+                    errors.push(
+                        ParseError::new(line_num, "DEFAULT_STATE requires a state name").into(),
+                    );
+                }
+            }
             continue;
         }
 
@@ -193,14 +239,28 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
                 services.push(svc);
             }
 
-            let name = match value {
-                Some(n) => n.to_string(),
+            let name_val = match value {
+                Some(n) => n,
                 None => {
                     errors.push(ParseError::new(line_num, "SERVICE requires a name").into());
                     continue;
                 }
             };
 
+            // Check for template syntax: name@
+            let is_template = name_val.ends_with('@');
+            let name = if is_template {
+                let n = &name_val[..name_val.len()-1];
+                if n.is_empty() {
+                    errors.push(ParseError::new(line_num, "SERVICE template name cannot be empty").into());
+                    continue;
+                }
+                n.to_string()
+            } else {
+                name_val.to_string()
+            };
+
+            // Validate service name (without @)
             if let Err(e) = validate_service_name(&name, line_num) {
                 errors.push(e.into());
                 continue;
@@ -221,7 +281,7 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
             }
             seen_service_names.insert(name.clone(), line_num);
 
-            current_service = Some(RawService::new(name, file_index));
+            current_service = Some(RawService::new_template(name, file_index, is_template));
             continue;
         }
 
@@ -633,6 +693,253 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
                 }
             }
 
+            // RFC 0001: state machine membership
+            "STATE" => {
+                let val = require_raw_value(&raw_val, "STATE", line_num, &mut errors);
+                if let Some(v) = val {
+                    for s in v.split_whitespace() {
+                        svc.state.values.push(s.to_string());
+                    }
+                }
+            }
+            "GROUP" => {
+                let val = require_raw_value(&raw_val, "GROUP", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.group = Some(v);
+                }
+            }
+            "SLICE" => {
+                let val = require_raw_value(&raw_val, "SLICE", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.slice = Some(v);
+                }
+            }
+
+            // RFC 0001: dependencies (REQUIRES_HEALTHY)
+            "REQUIRES_HEALTHY" => {
+                let val = require_raw_value(&raw_val, "REQUIRES_HEALTHY", line_num, &mut errors);
+                if let Some(v) = val {
+                    for s in v.split_whitespace() {
+                        svc.requires_healthy.values.push(s.to_string());
+                    }
+                }
+            }
+
+            // RFC 0001: health and lifecycle probes
+            "STARTUP" => {
+                let val = require_raw_value(&raw_val, "STARTUP", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.startup = Some(v);
+                }
+            }
+            "LIVENESS" => {
+                let val = require_raw_value(&raw_val, "LIVENESS", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.liveness = Some(v);
+                }
+            }
+            "READINESS" => {
+                let val = require_raw_value(&raw_val, "READINESS", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.readiness = Some(v);
+                }
+            }
+            "READY" => {
+                let val = require_raw_value(&raw_val, "READY", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.ready_mode = Some(v);
+                }
+            }
+            "WATCHDOG" => {
+                let val = require_raw_value(&raw_val, "WATCHDOG", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.watchdog = Some(v);
+                }
+            }
+            "LIFECYCLE" => {
+                let val = require_raw_value(&raw_val, "LIFECYCLE", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.lifecycle = Some(v);
+                }
+            }
+            "SESSION" => {
+                let val = require_raw_value(&raw_val, "SESSION", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.session = Some(v);
+                }
+            }
+
+            // RFC 0001: conditions and failure actions
+            "CONDITION" => {
+                let val = require_raw_value(&raw_val, "CONDITION", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.condition = Some(v);
+                }
+            }
+            "ASSERT" => {
+                let val = require_raw_value(&raw_val, "ASSERT", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.assert = Some(v);
+                }
+            }
+            "WINDOW" => {
+                let val = require_raw_value(&raw_val, "WINDOW", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.window = Some(v);
+                }
+            }
+            "ON_FAILURE" => {
+                let val = require_raw_value(&raw_val, "ON_FAILURE", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.on_failure = Some(v);
+                }
+            }
+
+            // RFC 0001: node-local requirements
+            "ARCH" => {
+                let val = require_raw_value(&raw_val, "ARCH", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.arch = Some(v);
+                }
+            }
+            "DEVICE" => {
+                let val = require_raw_value(&raw_val, "DEVICE", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.device = Some(v);
+                }
+            }
+            "REQUIRES_CAP" => {
+                let val = require_raw_value(&raw_val, "REQUIRES_CAP", line_num, &mut errors);
+                if let Some(v) = val {
+                    for cap in v.split_whitespace().flat_map(|s| s.split(',')) {
+                        svc.requires_cap.values.push(cap.to_string());
+                    }
+                }
+            }
+
+            // RFC 0001: security and trust
+            "CAPABILITY" => {
+                let val = require_raw_value(&raw_val, "CAPABILITY", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.capability = Some(v);
+                }
+            }
+            "READONLY_ROOT" => {
+                let val = require_raw_value(&raw_val, "READONLY_ROOT", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.readonly_root = Some(v);
+                }
+            }
+            "NO_NEW_PRIVILEGES" => {
+                let val = require_raw_value(&raw_val, "NO_NEW_PRIVILEGES", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.no_new_privileges = Some(v);
+                }
+            }
+            "PRIVATE_TMP" => {
+                let val = require_raw_value(&raw_val, "PRIVATE_TMP", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.private_tmp = Some(v);
+                }
+            }
+            "SECCOMP" => {
+                let val = require_raw_value(&raw_val, "SECCOMP", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.seccomp = Some(v);
+                }
+            }
+            "EPHEMERAL" => {
+                let val = require_raw_value(&raw_val, "EPHEMERAL", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.ephemeral = Some(v);
+                }
+            }
+            "ON_TAMPER" => {
+                let val = require_raw_value(&raw_val, "ON_TAMPER", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.on_tamper = Some(v);
+                }
+            }
+            "SECRET" => {
+                // Secret format: env_key from secret_ref
+                let val = require_raw_value(&raw_val, "SECRET", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.secret = Some(v);
+                }
+            }
+            "IDENTITY" => {
+                let val = require_raw_value(&raw_val, "IDENTITY", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.identity = Some(v);
+                }
+            }
+            "AUDIT" => {
+                let val = require_raw_value(&raw_val, "AUDIT", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.audit = Some(v);
+                }
+            }
+
+            // RFC 0001: change and observability (kv pairs stored as raw strings)
+            "UPDATE" => {
+                let val = require_raw_value(&raw_val, "UPDATE", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.update.values.push(v);
+                }
+            }
+            "ROLLOUT" => {
+                let val = require_raw_value(&raw_val, "ROLLOUT", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.rollout.values.push(v);
+                }
+            }
+            "METRICS" => {
+                let val = require_raw_value(&raw_val, "METRICS", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.metrics = Some(v);
+                }
+            }
+            "TRACES" => {
+                let val = require_raw_value(&raw_val, "TRACES", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.traces = Some(v);
+                }
+            }
+            "LOG_FORMAT" => {
+                let val = require_raw_value(&raw_val, "LOG_FORMAT", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.log_format = Some(v);
+                }
+            }
+
+            // RFC 0001: open facets (kv pairs stored as raw strings)
+            "ASSURANCE" => {
+                let val = require_raw_value(&raw_val, "ASSURANCE", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.assurance.values.push(v);
+                }
+            }
+            "LABEL" => {
+                let val = require_raw_value(&raw_val, "LABEL", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.label.values.push(v);
+                }
+            }
+            "PROFILE" => {
+                let val = require_raw_value(&raw_val, "PROFILE", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.profile = Some(v);
+                }
+            }
+
+            // RFC 0001: scaling
+            "INSTANCES" => {
+                let val = require_raw_value(&raw_val, "INSTANCES", line_num, &mut errors);
+                if let Some(v) = val {
+                    svc.instances = Some(v);
+                }
+            }
+
             _ => {
                 errors.push(
                     ParseError::new(line_num, format!("unknown directive '{}'", directive)).into(),
@@ -650,7 +957,12 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
         return Err(errors);
     }
 
-    Ok(RawOrchFile { args, services })
+    Ok(RawOrchFile {
+            args,
+            machine_states,
+            default_state,
+            services,
+        })
 }
 
 /// Helper to require a raw (unexpanded) value for a directive.

@@ -15,6 +15,8 @@ use crate::types::{ClearableMap, ClearableVec, RawOrchFile, RawService};
 pub fn merge(files: Vec<RawOrchFile>) -> RawOrchFile {
     let mut result = RawOrchFile {
         args: HashMap::new(),
+        machine_states: Vec::new(),
+        default_state: None,
         services: Vec::new(),
     };
 
@@ -22,6 +24,18 @@ pub fn merge(files: Vec<RawOrchFile>) -> RawOrchFile {
         // Merge ARGs: last wins
         for (k, v) in file.args {
             result.args.insert(k, v);
+        }
+
+        // Merge MACHINE_STATES: append with dedup
+        for state in file.machine_states {
+            if !result.machine_states.contains(&state) {
+                result.machine_states.push(state);
+            }
+        }
+
+        // Merge DEFAULT_STATE: last wins (scalar)
+        if let Some(ds) = file.default_state {
+            result.default_state = Some(ds);
         }
 
         // Merge services by name

@@ -13,6 +13,8 @@ fn raw_file(args: Vec<(&str, &str)>, services: Vec<RawService>) -> RawOrchFile {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
+        machine_states: Vec::new(),
+        default_state: None,
         services,
     }
 }

@@ -352,13 +352,75 @@ pub struct RawService {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
 
+    // RFC 0001: template support
+    pub template: bool,  // true if service name ends with '@'
+
     // C2/C3 provenance tracking (directive_name, line, file_index)
     pub container_directives_used: Vec<(String, usize, usize)>,
     pub host_directives_used: Vec<(String, usize, usize)>,
+
+    // RFC 0001: state machine membership
+    pub state: ClearableVec<String>,
+    pub group: Option<String>,
+    pub slice: Option<String>,
+
+    // RFC 0001: dependencies (REQUIRES_HEALTHY)
+    pub requires_healthy: ClearableVec<String>,
+
+    // RFC 0001: health and lifecycle probes (raw strings, stored as-is)
+    pub startup: Option<String>,
+    pub liveness: Option<String>,
+    pub readiness: Option<String>,
+    pub ready_mode: Option<String>,
+    pub watchdog: Option<String>,
+    pub lifecycle: Option<String>,
+    pub session: Option<String>,
+
+    // RFC 0001: conditions and failure actions (predicates stored as raw strings)
+    pub condition: Option<String>,
+    pub assert: Option<String>,
+    pub window: Option<String>,
+    pub on_failure: Option<String>,
+
+    // RFC 0001: node-local requirements
+    pub arch: Option<String>,
+    pub device: Option<String>,
+    pub requires_cap: ClearableVec<String>,
+
+    // RFC 0001: security and trust
+    pub capability: Option<String>,
+    pub readonly_root: Option<String>,
+    pub no_new_privileges: Option<String>,
+    pub private_tmp: Option<String>,
+    pub seccomp: Option<String>,
+    pub ephemeral: Option<String>,
+    pub on_tamper: Option<String>,
+    pub secret: Option<String>,
+    pub identity: Option<String>,
+    pub audit: Option<String>,
+
+    // RFC 0001: change and observability (key-value pairs as raw strings)
+    pub update: ClearableVec<String>,
+    pub rollout: ClearableVec<String>,
+    pub metrics: Option<String>,
+    pub traces: Option<String>,
+    pub log_format: Option<String>,
+
+    // RFC 0001: open facets (key-value pairs as raw strings)
+    pub assurance: ClearableVec<String>,
+    pub label: ClearableVec<String>,
+    pub profile: Option<String>,
+
+    // RFC 0001: scaling
+    pub instances: Option<String>,
 }
 
 impl RawService {
     pub fn new(name: String, file_index: usize) -> Self {
+        Self::new_template(name, file_index, false)
+    }
+
+    pub fn new_template(name: String, file_index: usize, template: bool) -> Self {
         RawService {
             name,
             file_index,
@@ -398,6 +460,44 @@ impl RawService {
             io_weight: None,
             stdout: None,
             stderr: None,
+            template,
+            state: ClearableVec::new(),
+            group: None,
+            slice: None,
+            requires_healthy: ClearableVec::new(),
+            startup: None,
+            liveness: None,
+            readiness: None,
+            ready_mode: None,
+            watchdog: None,
+            lifecycle: None,
+            session: None,
+            condition: None,
+            assert: None,
+            window: None,
+            on_failure: None,
+            arch: None,
+            device: None,
+            requires_cap: ClearableVec::new(),
+            capability: None,
+            readonly_root: None,
+            no_new_privileges: None,
+            private_tmp: None,
+            seccomp: None,
+            ephemeral: None,
+            on_tamper: None,
+            secret: None,
+            identity: None,
+            audit: None,
+            update: ClearableVec::new(),
+            rollout: ClearableVec::new(),
+            metrics: None,
+            traces: None,
+            log_format: None,
+            assurance: ClearableVec::new(),
+            label: ClearableVec::new(),
+            profile: None,
+            instances: None,
             container_directives_used: Vec::new(),
             host_directives_used: Vec::new(),
         }
@@ -408,5 +508,8 @@ impl RawService {
 #[derive(Debug, Clone)]
 pub struct RawOrchFile {
     pub args: HashMap<String, String>,
+    // RFC 0001: file-global machine state declarations
+    pub machine_states: Vec<String>,
+    pub default_state: Option<String>,
     pub services: Vec<RawService>,
 }
