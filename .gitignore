@@ -1,4 +1,4 @@
-/target/
+target/
 .orch/
 *.swp
 *.swo
@@ -13,5 +13,3 @@
 *.fls
 *.fdb_latexmk
 *.synctex.gz
-target/
-Cargo.lock
