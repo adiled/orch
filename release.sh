@@ -2,13 +2,12 @@
 set -euo pipefail
 
 # release.sh - bump version, sync lockfile, tag, and push.
-# Usage: ./release.sh [major|minor|patch|exact] [version]
+# Usage: ./release.sh [patch|minor|major]
 #
 # Examples:
 #     ./release.sh patch            # bumps 0.2.6 -> 0.2.7
 #     ./release.sh minor            # bumps 0.2.6 -> 0.3.0
 #     ./release.sh major            # bumps 0.2.6 -> 1.0.0
-#     ./release.sh exact 1.2.3      # sets version to 1.2.3
 
 BRANCH="$(git branch --show-current)"
 if [[ "$BRANCH" != "main" ]]; then
@@ -38,15 +37,8 @@ case "${1:-patch}" in
     IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VER"
     NEW_VER="$((MAJOR + 1)).0.0"
      ;;
-  exact)
-    if [[ -z "${2:-}" ]]; then
-      echo "error: 'exact' requires a version argument (e.g., './release.sh exact 1.2.0')" >&2
-      exit 1
-    fi
-    NEW_VER="$2"
-     ;;
   *)
-    echo "error: unknown bump type '${1}' (use patch|minor|major|exact)" >&2
+    echo "error: unknown bump type '${1}' (use patch|minor|major)" >&2
     exit 1
      ;;
 esac
