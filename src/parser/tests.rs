@@ -105,9 +105,9 @@ fn test_expansion__arg_in_publish() {
 
 #[test]
 fn test_expansion__arg_in_env() {
-    let input = "ARG db=canary\nSERVICE app\nRUN echo hi\nENV DB_NAME=${db}\n";
+    let input = "ARG db=orch\nSERVICE app\nRUN echo hi\nENV DB_NAME=${db}\n";
     let orch = parse_ok(input);
-    assert_eq!(orch.services[0].env["DB_NAME"], "canary");
+    assert_eq!(orch.services[0].env["DB_NAME"], "orch");
 }
 
 #[test]
@@ -710,94 +710,94 @@ fn test_directive_outside_service() {
 #[test]
 fn test_full_spec_example() {
     let input = r#"
-ARG postgres_port=5433
-ARG postgres_memory=4G
-ARG django_port=9090
+ARG prometheus_port=9091
+ARG prometheus_memory=2G
+ARG grafana_port=3001
 
-SERVICE postgres
-FROM pgvector/pgvector:pg15
-MEMORY ${postgres_memory}
+SERVICE prometheus
+FROM prom/prometheus:v2.47.0
+MEMORY ${prometheus_memory}
 CPUS 2
-PUBLISH ${postgres_port}:5432
-VOLUME postgres-data:/var/lib/postgresql/data
-ENV POSTGRES_USER=postgres
-ENV POSTGRES_PASSWORD=canary
-HEALTHCHECK pg_isready -h localhost -p ${postgres_port}
+PUBLISH ${prometheus_port}:9090
+VOLUME prometheus-data:/prometheus
+ENV TSDB_PATH=/prometheus
+ENV TSDB_RETENTION=15d
+HEALTHCHECK promtool check health
 RESTART on-failure
 RESTART_DELAY 5s
 
-SERVICE redis
-FROM redis:6.2.0-alpine
+SERVICE loki
+FROM grafana/loki:2.9.2
 MEMORY 1G
 CPUS 1
-PUBLISH 6380:6379
+PUBLISH 127.0.0.1:3100:3100
 RECREATE always
-HEALTHCHECK redis-cli -h localhost -p 6380 ping
+HEALTHCHECK wget -q --spider http://localhost:3100/ready
 RESTART always
 
-SERVICE django
-RUN python manage.py runserver 0.0.0.0:${django_port}
-WORKDIR backend/canary
-ENV DJANGO_SETTINGS_MODULE=canary.settings.dev
+SERVICE grafana
+RUN grafana server --http-addr 0.0.0.0:${grafana_port}
+WORKDIR /var/lib/grafana
+ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
 ENV_FILE ${ORCH_PROJECT}/.env.local
-REQUIRES postgres redis
+REQUIRES prometheus loki
 AFTER localstack
-HEALTHCHECK http://localhost:${django_port}/health
+HEALTHCHECK http://localhost:${grafana_port}/api/health
 RESTART on-failure
 RESTART_DELAY 2s
 MEMORY 2G
 LIMIT_NOFILE 65536
 TIMEOUT_START 60s
 
-SERVICE db-migrate
-FROM flyway/flyway:latest
-CMD -url=jdbc:postgresql://postgres/canary migrate
-REQUIRES postgres
+SERVICE config-check
+FROM prom/prometheus:v2.47.0
+CMD promtool check config /etc/prometheus/prometheus.yml
+REQUIRES prometheus
 ONESHOT true
 "#;
     let orch = parse_ok(input);
 
     assert_eq!(orch.services.len(), 4);
 
-    // postgres
-    let pg = &orch.services[0];
-    assert_eq!(pg.name, "postgres");
-    assert_eq!(pg.mode, ServiceMode::Container);
-    assert_eq!(pg.image.as_ref().unwrap(), "pgvector/pgvector:pg15");
-    assert_eq!(pg.resources.memory.as_ref().unwrap(), "4G");
-    assert_eq!(pg.resources.cpus.unwrap(), 2.0);
-    assert_eq!(pg.publish[0].host, 5433);
-    assert_eq!(pg.publish[0].container, 5432);
-    assert!(pg.volumes[0].is_named);
-    assert_eq!(pg.env["POSTGRES_USER"], "postgres");
-    assert_eq!(pg.restart.policy, RestartPolicy::OnFailure);
-    assert_eq!(pg.restart.delay.as_ref().unwrap(), "5s");
+    // prometheus
+    let prom = &orch.services[0];
+    assert_eq!(prom.name, "prometheus");
+    assert_eq!(prom.mode, ServiceMode::Container);
+    assert_eq!(prom.image.as_ref().unwrap(), "prom/prometheus:v2.47.0");
+    assert_eq!(prom.resources.memory.as_ref().unwrap(), "2G");
+    assert_eq!(prom.resources.cpus.unwrap(), 2.0);
+    assert_eq!(prom.publish[0].host, 9091);
+    assert_eq!(prom.publish[0].container, 9090);
+    assert!(prom.volumes[0].is_named);
+    assert_eq!(prom.env["TSDB_RETENTION"], "15d");
+    assert_eq!(prom.restart.policy, RestartPolicy::OnFailure);
+    assert_eq!(prom.restart.delay.as_ref().unwrap(), "5s");
 
-    // redis
-    let redis = &orch.services[1];
-    assert_eq!(redis.name, "redis");
-    assert_eq!(redis.recreate, RecreatePolicy::Always);
-    assert_eq!(redis.restart.policy, RestartPolicy::Always);
+    // loki
+    let loki = &orch.services[1];
+    assert_eq!(loki.name, "loki");
+    assert_eq!(loki.recreate, RecreatePolicy::Always);
+    assert_eq!(loki.restart.policy, RestartPolicy::Always);
 
-    // django
-    let dj = &orch.services[2];
-    assert_eq!(dj.name, "django");
-    assert_eq!(dj.mode, ServiceMode::Host);
+    // grafana
+    let gf = &orch.services[2];
+    assert_eq!(gf.name, "grafana");
+    assert_eq!(gf.mode, ServiceMode::Host);
     assert_eq!(
-        dj.run_command.as_ref().unwrap(),
-        "python manage.py runserver 0.0.0.0:9090"
+        gf.run_command.as_ref().unwrap(),
+        "grafana server --http-addr 0.0.0.0:3001"
     );
-    assert_eq!(dj.workdir.as_ref().unwrap(), "backend/canary");
-    assert_eq!(dj.requires, vec!["postgres", "redis"]);
-    assert_eq!(dj.after, vec!["localstack"]);
-    assert_eq!(dj.resources.limit_nofile.unwrap(), 65536);
-    assert_eq!(dj.timeouts.start.as_ref().unwrap(), "60s");
+    assert_eq!(gf.workdir.as_ref().unwrap(), "/var/lib/grafana");
+    assert_eq!(gf.requires, vec!["prometheus", "loki"]);
+    assert_eq!(gf.after, vec!["localstack"]);
+    assert_eq!(gf.resources.limit_nofile.unwrap(), 65536);
+    assert_eq!(gf.timeouts.start.as_ref().unwrap(), "60s");
 
-    // db-migrate
-    let mig = &orch.services[3];
-    assert_eq!(mig.name, "db-migrate");
-    assert!(mig.oneshot);
-    assert_eq!(mig.requires, vec!["postgres"]);
+    // config-check
+    let chk = &orch.services[3];
+    assert_eq!(chk.name, "config-check");
+    assert!(chk.oneshot);
+    assert_eq!(chk.requires, vec!["prometheus"]);
 }
 
 // =========================================================================

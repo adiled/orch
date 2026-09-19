@@ -65,24 +65,23 @@ ORCH_ARG_postgres_port=9999 orch parse Orchfile
 ```
 ORCH_VERSION 1.0.0-rc
 
-ARG postgres_port=5433
-ARG django_port=9090
+ARG prometheus_port=9091
 
-SERVICE postgres
-FROM pgvector/pgvector:pg15
-MEMORY 4G
+SERVICE prometheus
+FROM prom/prometheus:v2.47.0
+MEMORY 2G
 CPUS 2
-PUBLISH ${postgres_port}:5432
-VOLUME postgres-data:/var/lib/postgresql/data
-ENV POSTGRES_USER=postgres
-HEALTHCHECK pg_isready -h localhost -p ${postgres_port}
+PUBLISH ${prometheus_port}:9090
+VOLUME prometheus-data:/prometheus
+ENV TSDB_PATH=/prometheus
+HEALTHCHECK promtool check health
 RESTART on-failure
 
-SERVICE django
-RUN python manage.py runserver 0.0.0.0:${django_port}
-WORKDIR backend/canary
-REQUIRES postgres
-HEALTHCHECK http://localhost:${django_port}/health
+SERVICE grafana
+RUN grafana server --http-addr 0.0.0.0:3001
+WORKDIR /var/lib/grafana
+REQUIRES prometheus
+HEALTHCHECK http://localhost:3001/api/health
 ```
 
 ## JSON Output
@@ -95,33 +94,32 @@ orch parse Orchfile
 {
   "version": "1.0.0-rc",
   "args": {
-    "postgres_port": "5433",
-    "django_port": "9090"
+    "prometheus_port": "9091"
   },
   "services": [
     {
-      "name": "postgres",
+      "name": "prometheus",
       "mode": "container",
-      "image": "pgvector/pgvector:pg15",
-      "publish": [{ "host": 5433, "container": 5432 }],
-      "volumes": [{ "source": "postgres-data", "destination": "/var/lib/postgresql/data", "is_named": true }],
-      "env": { "POSTGRES_USER": "postgres" },
-      "healthcheck": "pg_isready -h localhost -p 5433",
+      "image": "prom/prometheus:v2.47.0",
+      "publish": [{ "host": 9091, "container": 9090 }],
+      "volumes": [{ "source": "prometheus-data", "destination": "/prometheus", "is_named": true }],
+      "env": { "TSDB_PATH": "/prometheus" },
+      "healthcheck": "promtool check health",
       "oneshot": false,
       "disabled": false,
       "recreate": "never",
       "restart": { "policy": "on_failure" },
       "timeouts": {},
-      "resources": { "memory": "4G", "cpus": 2.0 },
+      "resources": { "memory": "2G", "cpus": 2.0 },
       "logging": {}
     },
     {
-      "name": "django",
+      "name": "grafana",
       "mode": "host",
-      "run_command": "python manage.py runserver 0.0.0.0:9090",
-      "workdir": "backend/canary",
-      "requires": ["postgres"],
-      "healthcheck": "http://localhost:9090/health",
+      "run_command": "grafana server --http-addr 0.0.0.0:3001",
+      "workdir": "/var/lib/grafana",
+      "requires": ["prometheus"],
+      "healthcheck": "http://localhost:3001/api/health",
       "oneshot": false,
       "disabled": false,
       "recreate": "never",
@@ -147,7 +145,7 @@ orch parse Orchfile | jq -r '.services[].name'
 ### Get port mappings for a service
 
 ```sh
-orch parse Orchfile | jq '.services[] | select(.name == "postgres") | .publish'
+orch parse Orchfile | jq '.services[] | select(.name == "prometheus") | .publish'
 ```
 
 ### Generate a container run command
@@ -194,7 +192,7 @@ fi
 ### Extract all required dependencies for a service
 
 ```sh
-orch parse Orchfile | jq -r '.services[] | select(.name == "django") | .requires[]'
+orch parse Orchfile | jq -r '.services[] | select(.name == "grafana") | .requires[]'
 ```
 
 ### Build a dependency-ordered start list
@@ -243,7 +241,7 @@ orch parse Orchfile | jq '[.services[] | select(.mode == "host")]'
 ### Get the healthcheck for a specific service
 
 ```sh
-orch parse Orchfile | jq -r '.services[] | select(.name == "postgres") | .healthcheck // "none"'
+orch parse Orchfile | jq -r '.services[] | select(.name == "prometheus") | .healthcheck // "none"'
 ```
 
 ## Error Messages

@@ -265,7 +265,7 @@ RELOAD nginx -s reload
 Working directory for service execution.
 
 ```
-WORKDIR backend/canary
+WORKDIR orch
 WORKDIR /app
 ```
 
@@ -280,9 +280,9 @@ WORKDIR /app
 Set environment variable.
 
 ```
-ENV DJANGO_SETTINGS_MODULE=canary.settings.dev
+ENV SETTINGS_MODULE=orch.settings.dev
 ENV DEBUG=1
-ENV DATABASE_URL=postgres://localhost:5433/canary
+ENV DATABASE_URL=postgres://localhost:5433/orch
 ```
 
 **Format**: `KEY=value`
@@ -807,49 +807,49 @@ Available for expansion in directive values:
 ## Example Orchfile
 
 ```
-ARG postgres_port=5433
-ARG postgres_memory=4G
-ARG django_port=9090
+ARG prometheus_port=9091
+ARG prometheus_memory=2G
+ARG grafana_port=3001
 
-SERVICE postgres
-FROM pgvector/pgvector:pg15
-MEMORY ${postgres_memory}
+SERVICE prometheus
+FROM prom/prometheus:v2.47.0
+MEMORY ${prometheus_memory}
 CPUS 2
-PUBLISH ${postgres_port}:5432
-VOLUME postgres-data:/var/lib/postgresql/data
-ENV POSTGRES_USER=postgres
-ENV POSTGRES_PASSWORD=canary
-HEALTHCHECK pg_isready -h localhost -p ${postgres_port}
+PUBLISH ${prometheus_port}:9090
+VOLUME prometheus-data:/prometheus
+ENV TSDB_PATH=/prometheus
+ENV TSDB_RETENTION=15d
+HEALTHCHECK promtool check health
 RESTART on-failure
 RESTART_DELAY 5s
 
-SERVICE redis
-FROM redis:6.2.0-alpine
+SERVICE loki
+FROM grafana/loki:2.9.2
 MEMORY 1G
 CPUS 1
-PUBLISH 6380:6379
+PUBLISH 127.0.0.1:3100:3100
 RECREATE always
-HEALTHCHECK redis-cli -h localhost -p 6380 ping
+HEALTHCHECK wget -q --spider http://localhost:3100/ready
 RESTART always
 
-SERVICE django
-RUN python manage.py runserver 0.0.0.0:${django_port}
-WORKDIR backend/canary
-ENV DJANGO_SETTINGS_MODULE=canary.settings.dev
+SERVICE grafana
+RUN grafana server --http-addr 0.0.0.0:${grafana_port}
+WORKDIR /var/lib/grafana
+ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
 ENV_FILE ${ORCH_PROJECT}/.env.local
-REQUIRES postgres redis
+REQUIRES prometheus loki
 AFTER localstack
-HEALTHCHECK http://localhost:${django_port}/health
+HEALTHCHECK http://localhost:${grafana_port}/api/health
 RESTART on-failure
 RESTART_DELAY 2s
 MEMORY 2G
 LIMIT_NOFILE 65536
 TIMEOUT_START 60s
 
-SERVICE db-migrate
-FROM flyway/flyway:latest
-CMD -url=jdbc:postgresql://postgres/canary migrate
-REQUIRES postgres
+SERVICE config-check
+FROM prom/prometheus:v2.47.0
+CMD promtool check config /etc/prometheus/prometheus.yml
+REQUIRES prometheus
 ONESHOT true
 ```
 
