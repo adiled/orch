@@ -7,9 +7,10 @@ A parser for Orchfiles -- declarative, platform-agnostic service orchestration s
 ## Install
 
 ```sh
-cargo build --release
-cp target/release/orch /usr/local/bin/
+cargo install the-orch
 ```
+
+Installs the `orch` binary from crates.io.
 
 ## Usage
 
