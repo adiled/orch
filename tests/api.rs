@@ -57,7 +57,8 @@ fn parse_files_surfaces_structured_errors() {
         "bad.orch".to_string(),
         "SERVICE bad\nFROM img\nRUN cmd\n".to_string(),
     )];
-    let errs: Vec<OrchError> = the_orch::parse_files(&files, &HashMap::new()).expect_err("should fail");
+    let errs: Vec<OrchError> =
+        the_orch::parse_files(&files, &HashMap::new()).expect_err("should fail");
     assert!(errs.iter().any(|e| e.to_string().contains("C1")));
 }
 

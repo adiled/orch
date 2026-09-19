@@ -306,7 +306,7 @@ pub struct RawService {
 
     // Container-only keyed lists (key: container_port / destination)
     pub publish: ClearableVec<(String, String, String)>, // (address_raw, host_port_raw, container_port_raw)
-    pub volumes: ClearableVec<(String, String)>, // (source_raw, dest_raw)
+    pub volumes: ClearableVec<(String, String)>,         // (source_raw, dest_raw)
 
     // Host-only scalars
     pub user: Option<String>,

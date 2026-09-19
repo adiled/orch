@@ -481,11 +481,13 @@ fn test_common__healthcheck_command() {
 #[test]
 fn test_common__healthcheck_http() {
     let orch = parse_ok("SERVICE x\nRUN cmd\nHEALTHCHECK http://localhost:8000/health\n");
-    assert!(orch.services[0]
-        .healthcheck
-        .as_ref()
-        .unwrap()
-        .starts_with("http://"));
+    assert!(
+        orch.services[0]
+            .healthcheck
+            .as_ref()
+            .unwrap()
+            .starts_with("http://")
+    );
 }
 
 #[test]
@@ -1326,7 +1328,10 @@ fn test_orch_version__matching_is_accepted() {
 fn test_orch_version__mismatch_is_rejected() {
     let errors = parse_err("ORCH_VERSION 9.9.9\nSERVICE db\nFROM img\n");
     let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-    assert!(msgs.iter().any(|m| m.contains("unsupported Orchfile version '9.9.9'")));
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("unsupported Orchfile version '9.9.9'"))
+    );
 }
 
 #[test]
@@ -1337,7 +1342,10 @@ fn test_orch_version__must_precede_service() {
     );
     let errors = parse_err(&input);
     let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-    assert!(msgs.iter().any(|m| m.contains("must appear before any SERVICE")));
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("must appear before any SERVICE"))
+    );
 }
 
 #[test]
@@ -1353,7 +1361,10 @@ fn test_orch_version__duplicate_is_rejected() {
 fn test_orch_version__requires_value() {
     let errors = parse_err("ORCH_VERSION\nSERVICE db\nFROM img\n");
     let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-    assert!(msgs.iter().any(|m| m.contains("ORCH_VERSION requires a version value")));
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("ORCH_VERSION requires a version value"))
+    );
 }
 
 #[test]
@@ -1397,7 +1408,10 @@ fn test_publish__ipv6_host_address() {
 fn test_publish__address_expands_vars() {
     let input = "ARG ip=127.0.0.1\nSERVICE x\nFROM img\nPUBLISH ${ip}:8080:80\n";
     let orch = parse_ok(input);
-    assert_eq!(orch.services[0].publish[0].address.as_deref(), Some("127.0.0.1"));
+    assert_eq!(
+        orch.services[0].publish[0].address.as_deref(),
+        Some("127.0.0.1")
+    );
 }
 
 #[test]

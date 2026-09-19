@@ -156,7 +156,10 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
                 errors.push(
                     ParseError::new(
                         line_num,
-                        format!("duplicate ORCH_VERSION directive (first defined at line {})", prev),
+                        format!(
+                            "duplicate ORCH_VERSION directive (first defined at line {})",
+                            prev
+                        ),
                     )
                     .into(),
                 );
