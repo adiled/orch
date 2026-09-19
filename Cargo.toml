@@ -1,7 +1,11 @@
 [package]
 name = "orch"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
+
+[[bin]]
+name = "orch"
+path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
