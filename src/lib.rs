@@ -1,4 +1,4 @@
-/// The `orch` library: parse Orchfiles into a resolved [`types::OrchFile`].
+/// The `the-orch` library: parse Orchfiles into a resolved [`types::OrchFile`].
 ///
 /// The full pipeline (`parser` -> `merge` -> `resolve`) is exposed so consumers
 /// can parse in-process rather than shelling out to the `orch` CLI. Deserialize

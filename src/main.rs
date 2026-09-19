@@ -124,9 +124,9 @@ fn main() {
 
     let result = if file_contents.len() == 1 {
         // Single file: omit the filename from error locations (just "line N").
-        orch::parser::parse(&file_contents[0].1, &overrides)
+        the_orch::parser::parse(&file_contents[0].1, &overrides)
     } else {
-        orch::parse_files(&file_contents, &overrides)
+        the_orch::parse_files(&file_contents, &overrides)
     };
 
     match command.as_str() {
