@@ -8,6 +8,14 @@ set -euo pipefail
 #     ./release.sh patch            # bumps 0.2.6 -> 0.2.7
 #     ./release.sh minor            # bumps 0.2.6 -> 0.3.0
 #     ./release.sh major            # bumps 0.2.6 -> 1.0.0
+#
+# Core (always): Cargo.toml + Cargo.lock.
+
+# --- Project add-ons (optional) ----------------------------------------------
+# Extra files kept in version lockstep with Cargo.toml. Leave empty for plain
+# Rust projects. Example: (orchd-osx/build.zig.zon orchd-apple/build.zig.zon)
+EXTRA_VERSIONED_FILES=()
+# -----------------------------------------------------------------------------
 
 BRANCH="$(git branch --show-current)"
 if [[ "$BRANCH" != "main" ]]; then
@@ -43,15 +51,31 @@ case "${1:-patch}" in
      ;;
 esac
 
-# Bump Cargo.toml
-sed -i '' "s/version = \"$OLD_VER\"/version = \"$NEW_VER\"/" Cargo.toml
+# Files kept in version lockstep with Cargo.toml
+VERSIONED_FILES=(Cargo.toml "${EXTRA_VERSIONED_FILES[@]}")
+
+# Every versioned file must already carry OLD_VER, or versions have drifted.
+for f in "${VERSIONED_FILES[@]}"; do
+  if ! grep -q "\"$OLD_VER\"" "$f"; then
+    echo "error: $f does not contain version $OLD_VER (files out of sync?)" >&2
+    exit 1
+  fi
+done
+
+# Bump versions in all lockstep files:
+#   Cargo.toml      -> `version = "x.y.z"`
+#   build.zig.zon   -> `.version = "x.y.z"`   (fingerprint is name-bound, unchanged)
+for f in "${VERSIONED_FILES[@]}"; do
+  sed -i '' -e "s/^version = \"$OLD_VER\"/version = \"$NEW_VER\"/" \
+            -e "s/\.version = \"$OLD_VER\"/.version = \"$NEW_VER\"/" "$f"
+done
 
 # Update Cargo.lock to match
 cargo generate-lockfile
 
 # Verify no uncommitted changes aside from version bump
-if ! git diff --quiet -- Cargo.toml Cargo.lock; then
-  git add Cargo.toml Cargo.lock
+if ! git diff --quiet -- "${VERSIONED_FILES[@]}" Cargo.lock; then
+  git add "${VERSIONED_FILES[@]}" Cargo.lock
   git commit -m "chore: bump to $NEW_VER"
 fi
 
