@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# release.sh - bump version, tag, and push.
+# release.sh - bump version, sync lockfile, tag, and push.
 # Usage: ./release.sh [major|minor|patch|exact] [version]
 #
 # Examples:
-#    ./release.sh patch           # bumps 0.2.3 -> 0.2.4
-#    ./release.sh minor           # bumps 0.2.3 -> 0.3.0
-#    ./release.sh major           # bumps 0.2.3 -> 1.0.0
-#    ./release.sh exact 1.2.3     # sets version to 1.2.3
+#     ./release.sh patch            # bumps 0.2.6 -> 0.2.7
+#     ./release.sh minor            # bumps 0.2.6 -> 0.3.0
+#     ./release.sh major            # bumps 0.2.6 -> 1.0.0
+#     ./release.sh exact 1.2.3      # sets version to 1.2.3
 
 BRANCH="$(git branch --show-current)"
 if [[ "$BRANCH" != "main" ]]; then
@@ -54,9 +54,12 @@ esac
 # Bump Cargo.toml
 sed -i '' "s/version = \"$OLD_VER\"/version = \"$NEW_VER\"/" Cargo.toml
 
+# Update Cargo.lock to match
+cargo generate-lockfile
+
 # Verify no uncommitted changes aside from version bump
-if ! git diff --quiet -- Cargo.toml; then
-  git add Cargo.toml
+if ! git diff --quiet -- Cargo.toml Cargo.lock; then
+  git add Cargo.toml Cargo.lock
   git commit -m "chore: bump to $NEW_VER"
 fi
 
