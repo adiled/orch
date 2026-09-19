@@ -1,6 +1,6 @@
 [package]
 name = "the-orch"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 description = "Parser for Orchfiles — declarative, platform-agnostic service orchestration specifications. Parses, merges, resolves, and detects cycles in Orchfiles; outputs structured JSON."
 license = "Apache-2.0"
