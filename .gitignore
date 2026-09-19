@@ -13,3 +13,5 @@
 *.fls
 *.fdb_latexmk
 *.synctex.gz
+target/
+Cargo.lock
