@@ -1,11 +1,17 @@
 orchfile    ::= ( line newline )*
-line        ::= blank | comment | version | arg | service_decl | directive
+line        ::= blank | comment | version | machine_states | default_state | arg | service_decl | directive
 blank       ::= ws*
 comment     ::= ws* '#' any*
 
 version     ::= 'ORCH_VERSION' ws version_number
+
+/* File-global machine states (RFC 0001); declared before any SERVICE */
+machine_states ::= 'MACHINE_STATES' ws state_name ( ws state_name )*
+default_state  ::= 'DEFAULT_STATE' ws state_name
+
 arg         ::= 'ARG' ws identifier '=' value
-service_decl ::= 'SERVICE' ws service_name
+service_decl ::= 'SERVICE' ws ( service_name | template_name )
+template_name ::= service_name '@'                  /* template; instantiate with INSTANCES */
 
 directive   ::= mode_directive
               | container_directive
@@ -19,7 +25,7 @@ clear_directive
 
 clearable_target
             ::= 'ENV' | 'ENV_FILE' | 'PUBLISH' | 'VOLUME'
-              | 'REQUIRES' | 'AFTER'
+              | 'REQUIRES' | 'AFTER' | 'SECRET'
 
 /* Execution mode - mutually exclusive per service */
 mode_directive
@@ -45,21 +51,44 @@ env_directive
               | 'ENV' ws env_key '=' value
               | 'ENV_FILE' ws path
 
+/* Common - machine-state membership (RFC 0001) */
+state_directive
+            ::= 'STATE' ws state_name ( ws state_name )*
+              | 'GROUP' ws identifier
+              | 'SLICE' ws identifier
+
 /* Common - dependencies */
 dependency_directive
             ::= 'REQUIRES' ws service_name ( ws service_name )*
+              | 'REQUIRES_HEALTHY' ws service_name ( ws service_name )*
               | 'AFTER' ws service_name ( ws service_name )*
 
-/* Common - health */
+/* Common - health & lifecycle (RFC 0001) */
 health_directive
-            ::= 'HEALTHCHECK' ws ( url | command_string )
+            ::= 'HEALTHCHECK' ws ( url | command_string )   /* retained; = READINESS only */
+              | 'STARTUP' ws probe
+              | 'LIVENESS' ws probe
+              | 'READINESS' ws probe
+              | 'READY' ws ( 'notify' | 'poll' )
+              | 'WATCHDOG' ws duration
+              | 'LIFECYCLE' ws ( 'managed' | 'simple' )
               | 'READINESS_TIMEOUT' ws duration
+
+/* Common - conditions, windows, failure escalation (RFC 0001).
+   CONDITION/ASSERT/WINDOW share one predicate-provider ABI; the provider set is
+   a resolver registry, NOT enumerated in this grammar. */
+predicate_directive
+            ::= 'CONDITION' ws predicate
+              | 'ASSERT' ws predicate
+              | 'WINDOW' ws predicate
+              | 'ON_FAILURE' ws fail_action
 
 /* Common - lifecycle */
 lifecycle_directive
             ::= 'ONESHOT' ws bool
               | 'DISABLED' ws bool
               | 'RECREATE' ws recreate_policy
+              | 'SESSION' ws session_model
 
 /* Common - restart */
 restart_directive
@@ -83,6 +112,49 @@ resource_directive
               | 'TASKS_MAX' ws integer
               | 'IO_WEIGHT' ws integer   /* 10-1000 */
 
+/* Common - node-local requirements (RFC 0001); admission checks */
+requirement_directive
+            ::= 'ARCH' ws identifier
+              | 'DEVICE' ws path
+              | 'REQUIRES_CAP' ws cap ( ',' cap )*
+
+/* Common - security, identity, trust (RFC 0001) */
+security_directive
+            ::= 'CAPABILITY' ws cap_spec
+              | 'READONLY_ROOT' ws bool
+              | 'NO_NEW_PRIVILEGES' ws bool
+              | 'PRIVATE_TMP' ws bool
+              | 'SECCOMP' ws identifier
+              | 'EPHEMERAL' ws bool
+              | 'ON_TAMPER' ws tamper_action
+              | 'SECRET' ws env_key ws 'from' ws secret_ref
+              | 'IDENTITY' ws spiffe_id ( ws 'scope=' identity_scope )?
+              | 'AUDIT' ws audit_kind
+
+/* Common - change (RFC 0001; on-node only; fleet rollout is RFC 0003) */
+change_directive
+            ::= 'UPDATE' ws kv ( ws kv )*
+              | 'ROLLOUT' ws kv ( ws kv )*
+
+/* Common - observability (RFC 0001) */
+observability_directive
+            ::= 'METRICS' ws url ( ws 'format=' identifier )?
+              | 'TRACES' ws url
+              | 'LOG_FORMAT' ws ( 'text' | 'json' )
+
+/* Common - open assurance / label / profile facets (RFC 0001).
+   Keys are opaque to the core; their vocabulary (sil, asil, dal, pci-dss, ...)
+   is defined by external profile documents (RFC 0002), NOT by this grammar.
+   The one core-interpreted assurance key is the boolean `vital`. */
+facet_directive
+            ::= 'ASSURANCE' ws kv ( ws kv )*
+              | 'LABEL' ws kv ( ws kv )*
+              | 'PROFILE' ws identifier ( '@' token )? ( ws 'digest=' token )?
+
+/* Common - templated instances (RFC 0001) */
+scale_directive
+            ::= 'INSTANCES' ws ( integer | var_ref )
+
 /* Common - logging */
 logging_directive
             ::= 'STDOUT' ws path
@@ -90,26 +162,57 @@ logging_directive
 
 common_directive
             ::= env_directive
+              | state_directive
               | dependency_directive
               | health_directive
+              | predicate_directive
               | lifecycle_directive
               | restart_directive
               | timeout_directive
               | resource_directive
+              | requirement_directive
+              | security_directive
+              | change_directive
+              | observability_directive
+              | facet_directive
+              | scale_directive
               | logging_directive
 
 /* Terminals */
 service_name ::= letter ( letter | digit | '-' )*   /* max 63 chars */
 identifier  ::= letter ( letter | digit | '_' )*
 env_key     ::= ( letter | '_' ) ( letter | digit | '_' )*
+state_name  ::= identifier
 
 image_ref   ::= ( any - newline )+
 command_string ::= ( any - newline )+
 path        ::= ( any - newline )+
 value       ::= ( any - newline )*
 url         ::= ( 'http://' | 'https://' ) ( any - newline )+
+token       ::= ( letter | digit | '-' | '_' | '.' | ':' | '/' )+
 
 var_ref     ::= '${' identifier '}'
+
+/* Probes and predicates (RFC 0001) */
+probe       ::= ( 'exec' ws command_string ) | url | command_string
+predicate   ::= provider ( ':' value )?            /* resolved by an orchd provider; not enumerated */
+provider    ::= identifier ( '.' identifier )*     /* bare = standard registry; dotted = reverse-DNS plugin */
+fail_action ::= 'restart' | 'state:' state_name | 'unit:' service_name
+tamper_action ::= 'zeroize' | 'unit:' service_name
+session_model ::= 'daemon' | 'oneshot' | 'transactional'
+identity_scope ::= 'service' | 'session'
+audit_kind  ::= 'lifecycle' | 'access'
+
+/* Security / facet terminals (RFC 0001) */
+cap         ::= ( letter | digit | '_' )+          /* e.g. gpu, npu, hugepages, sriov */
+cap_spec    ::= ( 'drop:' capset )? ( ws? 'add:' capset )?
+capset      ::= 'ALL' | cap_name ( ',' cap_name )*
+cap_name    ::= ( upper | '_' )+                   /* e.g. NET_BIND_SERVICE */
+kv          ::= identifier '=' token
+secret_ref  ::= scheme '://' ( any - newline )+    /* reference only; secret value never read (opaque) */
+scheme      ::= letter ( letter | digit | '+' | '-' | '.' )*   /* bare scheme reserved; custom = reverse-DNS */
+spiffe_id   ::= 'spiffe://' ( any - newline )+
+index_ref   ::= '%' ( '0' digit+ )? 'i'            /* instance index inside a value: %i, or %0Ni (padded) */
 
 bool        ::= 'true' | 'false'
 restart_policy ::= 'no' | 'always' | 'on-failure'
@@ -126,6 +229,7 @@ prerelease  ::= ( letter | digit | '-' | '.' )+   /* e.g. rc, beta.1 */
 host_address ::= ( letter | digit | '.' | ':' )+   /* IPv4, IPv6, or hostname */
 
 letter      ::= [a-z]
+upper       ::= [A-Z]
 digit       ::= [0-9]
 ws          ::= [ #x9]+
 newline     ::= #xA

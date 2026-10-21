@@ -362,6 +362,13 @@ HEALTHCHECK redis-cli -h localhost ping
 - Starts with `http://` or `https://` → HTTP check (expect 2xx)
 - Otherwise → Execute command (expect exit code 0)
 
+**Semantics (RFC 0001)**: `HEALTHCHECK` is defined as exactly a `READINESS` probe.
+It gates dependents and traffic routing but never restarts the service, which is
+parity with the base behavior where `RESTART` fires only on process exit and a
+hung process is never replaced. For restart-on-unhealthy use `LIVENESS`
+explicitly; for hang/deadlock detection use `WATCHDOG`. See the Lifecycle &
+Health extensions below.
+
 #### READINESS_TIMEOUT
 
 How long to wait for HEALTHCHECK to pass during startup.
@@ -659,6 +666,184 @@ STDERR /var/log/myapp.err
 
 ---
 
+## RFC 0001 Extensions
+
+The directives below extend the **node unit spec** along three axes: time
+(lifecycle, health, states, conditions, change), space (node-local requirements,
+templated instances), and trust (sandbox, secrets, identity). Normative syntax is
+in [`grammar.ebnf`](grammar.ebnf).
+
+Out of scope, by design: cross-node placement, affinity, and redundancy
+(`PLACEMENT`/`AFFINITY`/`ANTI_AFFINITY`/`REDUNDANCY`) are a separate
+fleet-composition layer; and the assurance/compliance *vocabulary*
+(`sil`/`asil`/`dal`/`pci-dss`/...) lives in external profile documents, not in
+this grammar. The core interprets exactly one assurance key, the boolean `vital`.
+
+### Lifecycle & Health
+
+Splits the single `HEALTHCHECK` into distinct signals and adds a push channel,
+a watchdog, and a managed lifecycle.
+
+- `STARTUP <probe>`: gate that must pass before liveness/readiness are evaluated (slow boots).
+- `LIVENESS <probe>`: if it fails, the service is **restarted**.
+- `READINESS <probe>`: if it fails, dependents wait and traffic is withheld, but the service is **not** restarted.
+- `READY notify | poll`: push readiness over the orchd notify socket (`notify`) instead of being polled.
+- `WATCHDOG <duration>`: the service must emit a keep-alive within the window; a miss is treated as a hang and the service is restarted (catches deadlock/livelock).
+- `LIFECYCLE managed | simple`: `managed` exposes configure/activate/deactivate transitions (claim and configure hardware before acting); `simple` (default) is start/stop. On a managed service, a readiness failure deactivates (Active to Inactive), it does not restart; readiness loss is not a failure and never triggers `ON_FAILURE`.
+
+```
+STARTUP exec test -S /run/opcua.sock
+LIVENESS http://localhost:9100/livez
+READINESS http://localhost:9100/readyz
+READY notify
+WATCHDOG 20s
+LIFECYCLE managed
+```
+
+### Machine States
+
+File-global state set plus per-service membership. The active state determines
+which services run (the Adaptive AUTOSAR function-group model, generalized).
+
+- `MACHINE_STATES <name>...` (file-global): declares the machine's operational states.
+- `DEFAULT_STATE <name>` (file-global): state entered at boot.
+- `STATE <name>...`: the states in which a service is active (omitted = active in all states).
+- `GROUP <name>`: logical membership for bulk operations.
+- `SLICE <name>`: hierarchical resource-accounting group (cgroup subtree).
+
+```
+MACHINE_STATES running maintenance update
+DEFAULT_STATE running
+
+SERVICE collector
+STATE running
+SLICE data
+```
+
+Flat states only; concurrent function groups are a deferred non-goal. A future
+multi-group model must treat today's `MACHINE_STATES`/`STATE` as the single
+default group, so flat files remain valid.
+
+### Node-local Requirements
+
+Admission checks on every backend. Unmet requirements fail admission; pair with a
+`CONDITION` to make a requirement optional (then it skips instead of failing).
+
+- `ARCH <arch>`: required CPU architecture (e.g. `arm64`).
+- `DEVICE <path>`: required device node.
+- `REQUIRES_CAP <cap>[,<cap>...]`: required node capability (`gpu`, `npu`, `hugepages`, `sriov`, ...).
+
+```
+ARCH arm64
+DEVICE /dev/ttyS1
+REQUIRES_CAP hugepages,sriov
+```
+
+### Conditions, Windows & Failure
+
+`CONDITION`, `ASSERT`, and `WINDOW` take a **predicate** (`provider[:arg]`)
+resolved by an orchd provider; the provider set is a registry, not grammar.
+Standard providers include `network-online`, `network-trusted`, `time-synced`,
+`path-exists:<path>`, `power-state:<state>`, `arg:<name>`, `contact-pass`,
+`tariff:<name>`. Custom providers are reverse-DNS namespaced (`com.vendor.x`).
+
+- `CONDITION <predicate>`: start only if it holds, otherwise **skip** (not an error).
+- `ASSERT <predicate>`: like `CONDITION`, but unmet is a hard **failure**.
+- `WINDOW <predicate>`: active only while the (recurring) window is open.
+- `REQUIRES_HEALTHY <service>...`: wait until a dependency is *ready/healthy*, not merely started.
+- `ON_FAILURE <action>`: escalate on failure: `restart`, `state:<name>`, or `unit:<service>`.
+
+```
+CONDITION network-online
+CONDITION path-exists:/dev/gps
+ASSERT path-exists:/dev/irrig-interlock
+WINDOW tariff:offpeak
+REQUIRES_HEALTHY postgres
+ON_FAILURE state:safe-mode
+```
+
+### Security, Identity & Trust
+
+Least-privilege sandboxing, secret references (never values), attested identity,
+and audit. `SECRET` records a reference URI only; the secret value is never read,
+resolved, or emitted in `orch parse` output. This is the secure replacement for
+placing secrets in `ENV`, where the value would appear in plaintext.
+
+- `CAPABILITY drop:<set> add:<set>`: Linux capability bounding set.
+- `READONLY_ROOT <bool>`, `NO_NEW_PRIVILEGES <bool>`, `PRIVATE_TMP <bool>`: sandbox toggles.
+- `SECCOMP <profile>`: syscall filter (`default`, `strict`, or a named profile).
+- `EPHEMERAL <bool>`: state lives only in volatile memory; nothing survives power loss.
+- `ON_TAMPER zeroize | unit:<service>`: action on a tamper/capture signal.
+- `SECRET <NAME> from <reference>`: bind a secret by reference (`vault://`, `tpm://`, `file://`, or a reverse-DNS-namespaced scheme). Resolution happens at runtime in platform tooling. Merged by name; clearable via `CLEAR SECRET`.
+- `IDENTITY <spiffe-id> [scope=service|session]`: attested workload identity (SPIFFE SVID); `scope=session` mints per-transaction.
+- `AUDIT lifecycle | access`: mark events for the tamper-evident audit log.
+
+```
+CAPABILITY drop:ALL add:NET_BIND_SERVICE
+READONLY_ROOT true
+NO_NEW_PRIVILEGES true
+SECCOMP strict
+SECRET DB_PASSWORD from vault://canary/db
+IDENTITY spiffe://canary/web scope=session
+AUDIT lifecycle
+```
+
+### Change
+
+Health-gated, reversible change. On-node only; cross-node/fleet rollout is out of
+scope (fleet layer).
+
+- `UPDATE strategy=<ab|inplace> [rollback=on-health-fail] [signature=required]`: how a revision is applied; A/B with automatic rollback if the new revision fails its readiness gate.
+- `ROLLOUT strategy=<rolling|blue-green|canary> [max-unavailable=<n>] [gate=readiness]`: how an on-node rollout proceeds across a template's instances (or a single service's blue-green).
+
+```
+UPDATE strategy=ab rollback=on-health-fail signature=required
+ROLLOUT strategy=canary gate=readiness
+```
+
+### Observability
+
+- `METRICS <url> [format=prometheus]`: scrapeable metrics endpoint.
+- `TRACES <otlp-endpoint>`: trace export target (OpenTelemetry).
+- `LOG_FORMAT text | json`: structured log contract.
+
+### Lifecycle taxonomy
+
+- `SESSION daemon | oneshot | transactional`: `daemon` (default) is long-running; `oneshot` runs to completion; `transactional` is a stateful, possibly-paid session. `ONESHOT true` is exact sugar for `SESSION oneshot` and is retained for backward compatibility; new files should prefer `SESSION oneshot`.
+
+### Templated instances
+
+- `SERVICE <name>@`: declares a template service.
+- `INSTANCES <n>`: instantiate `name@1 .. name@n`.
+- `%i` / `%0Ni`: the instance index in directive values; `%i` is unpadded, `%0Ni` is zero-padded to width N. When composing an index into a numeric token (a port), use a fixed-width form so width does not shift past a power of ten.
+
+```
+SERVICE worker@
+INSTANCES 8
+ENV SHARD=%i
+READINESS http://localhost:96%02i/readyz
+```
+
+### Open assurance / label / profile facets
+
+Opaque, namespaced facets the core carries verbatim. Their vocabulary is
+interpreted by external **profile documents**, which expand them to concrete
+directives; that expansion is pinned in output. The one core-interpreted
+assurance key is the boolean `vital`, which marks a safety-critical path (it does
+not propagate across `REQUIRES`).
+
+- `ASSURANCE <k>=<v>...`: e.g. `vital=true sil=4 cert=en50128`. Only `vital` is core-interpreted; the rest is profile vocabulary.
+- `LABEL <k>=<v>...`: handling labels, e.g. `classification=secret`.
+- `PROFILE <name>[@<version>] [digest=<hash>]`: apply a named profile document.
+
+```
+ASSURANCE vital=true sil=4 cert=en50128
+LABEL classification=secret
+PROFILE pci-dss@1.2 digest=sha256:...
+```
+
+---
+
 ## File Composition (Overlay Model)
 
 Orchfile supports multi-file composition using a systemd drop-in inspired overlay model. A base Orchfile can be overlaid with environment-specific files (staging, CI, personal) that tune resources, ports, env vars, and dependencies without forking the entire file.
@@ -692,6 +877,7 @@ SERVICE web
 #### Keyed Lists: Merge by Key
 
 - **ENV**: Merged by variable name (overlay wins on conflict)
+- **SECRET**: Merged by secret name (overlay wins on conflict)
 - **PUBLISH**: Merged by container port (overlay replaces host address and port for same container port)
 - **VOLUME**: Merged by destination path (overlay replaces source for same destination)
 
@@ -742,6 +928,7 @@ The `CLEAR` directive resets a list-type field before applying overlay values. W
 ```
 CLEAR ENV
 CLEAR ENV_FILE
+CLEAR SECRET
 CLEAR PUBLISH
 CLEAR VOLUME
 CLEAR REQUIRES
