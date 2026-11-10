@@ -1,0 +1,5 @@
+SERVICE a
+RUN echo ${late}
+ARG late=yes
+SERVICE b
+RUN echo ${late}

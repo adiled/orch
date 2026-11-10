@@ -1,0 +1,6 @@
+SERVICE app
+FROM img
+CMD serve
+PUBLISH 8080:80
+VOLUME d:/d
+ENV A=1

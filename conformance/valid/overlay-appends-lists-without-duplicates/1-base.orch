@@ -1,0 +1,8 @@
+SERVICE db
+RUN x
+SERVICE cache
+RUN x
+SERVICE web
+RUN x
+REQUIRES db
+ENV_FILE /a.env

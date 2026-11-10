@@ -1,0 +1,5 @@
+ARG k=A
+SERVICE app
+RUN x
+ENV ${k}=1
+ENV A=2

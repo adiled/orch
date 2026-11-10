@@ -1,0 +1,9 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE db
+RUN x
+
+SERVICE app
+RUN x
+REQUIRES db
+AFTER db ghost

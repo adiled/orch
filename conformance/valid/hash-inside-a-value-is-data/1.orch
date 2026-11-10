@@ -1,0 +1,3 @@
+SERVICE app
+RUN echo hi # not a comment
+ENV COLOR=#ff0000

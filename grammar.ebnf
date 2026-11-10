@@ -100,7 +100,7 @@ resource_directive
               | 'LIMIT_NOFILE' ws integer
               | 'LIMIT_NPROC' ws integer
               | 'TASKS_MAX' ws integer
-              | 'IO_WEIGHT' ws integer   /* 10-1000 */
+              | 'IO_WEIGHT' ws integer   /* 1-10000 */
 
 /* Common - logging */
 logging_directive
@@ -123,16 +123,19 @@ identifier  ::= ( alpha | '_' ) ( alpha | digit | '_' )*   /* ARG names */
 env_key     ::= identifier
 user_name   ::= ( alpha | digit | '_' ) ( alpha | digit | '_' | '-' | '.' )*
 
-volume_source      ::= volume_part   /* host path or named volume */
-volume_destination ::= volume_part   /* container path */
-volume_part ::= ( visible - ':' ) ( ( any - ':' )* ( visible - ':' ) )?
+volume_source      ::= volume_path | volume_name
+volume_destination ::= volume_path
+volume_path ::= '/' volume_rest? | '~' ( '/' volume_rest? )?
+volume_rest ::= ( any - ':' )* ( visible - ':' )
+volume_name ::= alnum ( alnum | '_' | '.' | '-' )*
 volume_mode ::= 'ro' | 'rw'
 
 /* Free text. It never starts or ends with whitespace. */
 text        ::= visible ( any* visible )?
 image_ref   ::= text
 command_string ::= text
-path        ::= text
+path        ::= '/' path_rest? | '~' ( '/' path_rest? )?
+path_rest   ::= any* visible
 value       ::= ( any* visible )?   /* after '='; may be empty */
 url         ::= ( 'http://' | 'https://' ) text
 

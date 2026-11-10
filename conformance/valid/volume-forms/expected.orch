@@ -1,0 +1,8 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE db
+FROM postgres
+VOLUME pgdata:/var/lib/data
+VOLUME /host/conf:/etc/conf:ro
+VOLUME ~/cache:/cache
+VOLUME logs.v1:/logs

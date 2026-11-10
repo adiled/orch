@@ -14,7 +14,7 @@ PUBLISH ${prometheus_port}:9090
 VOLUME prometheus-data:/prometheus
 ENV TSDB_PATH=/prometheus
 ENV TSDB_RETENTION=15d
-HEALTHCHECK promtool check health
+HEALTHCHECK http://localhost:9090/-/healthy
 RESTART on-failure
 RESTART_DELAY 5s
 
@@ -31,7 +31,7 @@ SERVICE grafana
 RUN grafana server --http-addr 0.0.0.0:${grafana_port}
 WORKDIR /var/lib/grafana
 ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-ENV_FILE .env.local
+ENV_FILE ~/.env.local
 REQUIRES prometheus loki
 AFTER localstack
 HEALTHCHECK http://localhost:${grafana_port}/api/health

@@ -1,0 +1,5 @@
+SERVICE db
+RUN x
+SERVICE app
+RUN x
+AFTER db # optional

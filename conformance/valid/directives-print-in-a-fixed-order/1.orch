@@ -1,0 +1,7 @@
+SERVICE app
+STDERR /e
+MEMORY 1G
+ENV A=1
+WORKDIR /w
+RUN x
+USER www-data

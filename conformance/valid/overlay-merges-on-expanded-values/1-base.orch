@@ -1,0 +1,8 @@
+ARG p=80
+ARG d=db
+SERVICE db
+RUN x
+SERVICE web
+FROM nginx
+PUBLISH 8080:${p}
+REQUIRES ${d}

@@ -1,0 +1,3 @@
+SERVICE app
+RUN ./serve
+USER app

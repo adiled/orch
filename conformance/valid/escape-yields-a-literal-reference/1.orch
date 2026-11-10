@@ -1,0 +1,3 @@
+ARG a=$${b}
+SERVICE app
+RUN sh -c 'echo $${HOME} ${a}'

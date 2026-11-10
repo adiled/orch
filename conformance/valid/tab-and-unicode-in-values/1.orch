@@ -1,0 +1,3 @@
+SERVICE app
+RUN printf 'a	b'
+ENV GREETING=👋 héllo

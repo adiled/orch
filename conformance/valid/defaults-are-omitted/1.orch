@@ -1,0 +1,6 @@
+SERVICE app
+RUN x
+RESTART no
+ONESHOT false
+DISABLED false
+RECREATE never

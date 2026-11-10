@@ -1,0 +1,5 @@
+SERVICE app
+RUN x
+ENV EMPTY=
+ENV URL=postgres://h/db?a=b
+ENV PADDED= x

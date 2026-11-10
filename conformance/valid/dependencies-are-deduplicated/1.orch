@@ -1,0 +1,7 @@
+SERVICE db
+RUN x
+SERVICE app
+RUN x
+REQUIRES db db
+AFTER db
+AFTER db ghost

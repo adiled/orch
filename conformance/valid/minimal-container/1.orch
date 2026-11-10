@@ -1,0 +1,2 @@
+SERVICE db
+FROM postgres:15

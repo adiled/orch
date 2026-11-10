@@ -1,0 +1,2 @@
+SERVICE web
+FROM nginx:1.25

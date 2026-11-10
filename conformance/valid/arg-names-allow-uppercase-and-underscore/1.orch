@@ -1,0 +1,4 @@
+ARG DATA_DIR=/srv
+ARG _x=1
+SERVICE app
+RUN run ${DATA_DIR} ${_x}

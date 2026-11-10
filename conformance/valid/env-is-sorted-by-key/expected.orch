@@ -1,0 +1,7 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE app
+RUN x
+ENV A=1
+ENV B=2
+ENV _C=3

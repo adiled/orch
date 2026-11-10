@@ -1,0 +1,3 @@
+SERVICE app
+RUN x
+CPU_QUOTA 50

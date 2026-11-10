@@ -1,0 +1,2 @@
+SERVICE app
+RUN echo ${oops

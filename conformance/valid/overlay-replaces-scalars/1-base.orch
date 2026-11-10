@@ -1,0 +1,3 @@
+SERVICE web
+FROM nginx:1.24
+MEMORY 1G

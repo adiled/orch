@@ -1,0 +1,3 @@
+SERVICE app
+RUN x
+MEMORY 2G # two

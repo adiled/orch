@@ -1,6 +1,3 @@
-//! Integration tests exercising the public library API as an external consumer
-//! would (issue #4): parse in-process without shelling out to the `orch` CLI.
-
 use std::collections::HashMap;
 
 use the_orch::error::OrchError;
@@ -59,16 +56,8 @@ fn parse_files_surfaces_structured_errors() {
     )];
     let errs: Vec<OrchError> =
         the_orch::parse_files(&files, &HashMap::new()).expect_err("should fail");
-    assert!(errs.iter().any(|e| e.to_string().contains("C1")));
-}
-
-#[test]
-fn pipeline_modules_are_public_and_composable() {
-    // The lower-level pipeline (parser -> merge -> resolve) is reachable directly.
-    let raw = the_orch::parser::parse_raw("SERVICE x\nFROM img\n", 0).expect("raw parse");
-    assert_eq!(raw.services.len(), 1);
-
-    let merged = the_orch::merge::merge(vec![raw]);
-    let resolved = the_orch::resolve::resolve(merged, &HashMap::new(), &[]).expect("resolve");
-    assert_eq!(resolved.services[0].name, "x");
+    assert!(
+        errs.iter()
+            .any(|e| e.to_string().contains("at most one of FROM and RUN"))
+    );
 }

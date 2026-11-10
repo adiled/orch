@@ -1,0 +1,4 @@
+SERVICE web
+REQUIRES cache db
+ENV_FILE /a.env
+ENV_FILE /b.env

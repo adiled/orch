@@ -1,0 +1,9 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE app
+RUN x
+WORKDIR ~
+ENV_FILE ~/.env
+ENV_FILE /etc/app.env
+STDOUT /var/log/app.log
+STDERR ~/app.err

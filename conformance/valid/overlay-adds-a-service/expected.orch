@@ -1,0 +1,7 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE a
+RUN x
+
+SERVICE b
+RUN y

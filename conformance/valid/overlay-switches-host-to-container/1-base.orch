@@ -1,0 +1,5 @@
+SERVICE app
+RUN ./serve
+USER app
+STOP ./stop
+ENV A=1

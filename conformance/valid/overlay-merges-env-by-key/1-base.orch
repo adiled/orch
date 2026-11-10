@@ -1,0 +1,4 @@
+SERVICE web
+FROM nginx
+ENV MODE=production
+ENV KEEP=1

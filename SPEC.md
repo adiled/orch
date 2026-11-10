@@ -1,8 +1,6 @@
 # Orchfile Specification
 
-**Version**: 1.0.0-rc  
-**Target**: Local, ephemeral, development, and staging environments  
-**Not for**: Production deployments at scale
+**Version**: 1.0.0-rc
 
 ## Overview
 
@@ -11,10 +9,10 @@ Orchfile is a declarative specification for service orchestration. It describes 
 ## Design Principles
 
 1. **Platform-agnostic specification** - Orchfile defines intent, not implementation
-2. **Explicit over implicit** - No magic defaults that vary by platform
+2. **Explicit over implicit** - Every default is stated in this spec; what a directive leaves to the runtime is stated too
 3. **Container XOR Host** - A service is either containerized or host-native, never both
 4. **Dependency clarity** - Distinguish between ordering and requirements
-5. **Resource-aware** - Development environments need resource optimization too
+5. **Resource-aware** - A service declares its resource limits
 
 ## File Format
 
@@ -107,7 +105,7 @@ ARG memory=4G
 2. Environment: `ORCH_ARG_name=value`
 3. Orchfile default
 
-An override applies only to an ARG that one of the files declares. An override for an undeclared name is ignored.
+An override applies only to an ARG declared in one of the Orchfiles being resolved. An override for an undeclared name is ignored.
 
 **Variable expansion**: `${name}` in any directive value is replaced with that ARG's value.
 
@@ -121,7 +119,7 @@ An override applies only to an ARG that one of the files declares. An override f
 **Values supplied by a runtime**: A runtime that needs to provide a value, such as a data directory, passes it as an override. The Orchfile declares the ARG with a default, so it still parses on its own.
 
 ```
-ARG data_dir=./.orch/data
+ARG data_dir=~/.orch/data
 
 SERVICE postgres
 FROM postgres:15
@@ -177,8 +175,6 @@ RUN uvicorn --host 0.0.0.0 --port 8000 app:main
 RUN /usr/bin/redis-server /etc/redis.conf
 ```
 
-**Command execution**: Run via platform's process supervisor (launchd, systemd).
-
 ---
 
 ### Container-Mode Directives
@@ -223,15 +219,17 @@ Mount host path or named volume into container.
 ```
 VOLUME /host/path:/container/path
 VOLUME my-named-volume:/var/lib/data
-VOLUME ./data/postgres:/var/lib/postgresql/data
-VOLUME ./config:/etc/app:ro
+VOLUME ~/data/postgres:/var/lib/postgresql/data
+VOLUME ~/config:/etc/app:ro
 ```
 
 **Format**: `source:destination[:mode]`. Source and destination are non-empty and may not contain `:`.
 
 **Mode**: `ro` mounts read-only; `rw` (the default) mounts read-write. Other mount options are not supported.
 
-**Host paths and named volumes**: A source starting with `/`, `./`, or `../` is a host path. Relative host paths are resolved against the project directory (see [Relative Paths](#relative-paths)). Any other source is a named volume, created if missing.
+**Source**: A [path](#paths) on the host, or the name of a volume. A volume name starts with a letter or digit and continues with letters, digits, `_`, `.` and `-`; the volume is created if missing.
+
+**Destination**: A [path](#paths) inside the container. A trailing `/` is ignored, so `/data` and `/data/` are the same destination.
 
 **Multiple allowed**: Specify multiple VOLUME directives. Each destination is mounted at most once per service (C6).
 
@@ -250,10 +248,6 @@ USER www-data
 
 **Default**: Current user
 
-**Platform mapping**:
-- launchd: `UserName` key in plist
-- systemd: `User=` directive
-
 #### STOP
 
 Custom command to stop the service gracefully.
@@ -265,22 +259,14 @@ STOP /usr/local/bin/myapp --shutdown
 
 **Default**: Send SIGTERM to process group
 
-**Platform mapping**:
-- launchd: Not directly supported (uses process termination)
-- systemd: `ExecStop=`
-
 #### RELOAD
 
 Command to reload service configuration without restart.
 
 ```
-RELOAD kill -SIGHUP $MAINPID
+RELOAD kill -HUP $(cat /run/myapp.pid)
 RELOAD nginx -s reload
 ```
-
-**Platform mapping**:
-- launchd: Not directly supported
-- systemd: `ExecReload=`
 
 ---
 
@@ -291,15 +277,11 @@ RELOAD nginx -s reload
 Working directory for service execution.
 
 ```
-WORKDIR orch
 WORKDIR /app
+WORKDIR ~/app
 ```
 
-**Relative paths**: Resolved against the project directory (see [Relative Paths](#relative-paths))
-
-**Container mode**: Sets container working directory
-
-**Host mode**: Sets process working directory
+A [path](#paths). In a container service it is a path inside the container; in a host service it is a path on the host.
 
 #### ENV
 
@@ -322,17 +304,15 @@ ENV DATABASE_URL=postgres://localhost:5433/orch
 Load environment variables from file.
 
 ```
-ENV_FILE .env.local
+ENV_FILE ~/.env.local
 ENV_FILE /etc/myapp/secrets.env
 ```
+
+A [path](#paths) on the host.
 
 **Format**: One `KEY=value` per line, `#` comments supported.
 
 **Multiple allowed**: Files loaded in order, later values override earlier.
-
-**Platform mapping**:
-- launchd: Parsed and inlined into plist
-- systemd: `EnvironmentFile=`
 
 ---
 
@@ -350,6 +330,7 @@ REQUIRES refresh-backend-deps
 **Behavior**: 
 - Required services are started first
 - If required service fails to become healthy, dependent service does not start
+- If a required service is `DISABLED`, the dependent service does not start
 - Creates both ordering AND requirement relationship
 
 #### AFTER
@@ -365,10 +346,6 @@ AFTER nginx
 - Specified services are started first if they exist
 - If specified service is disabled or fails, dependent still starts
 - Creates ordering only, NOT requirement
-
-**Migration from DEPENDS**: The legacy `DEPENDS` directive was ambiguous and has been removed. Convert as follows:
-- `DEPENDS foo` where foo MUST succeed → `REQUIRES foo`
-- `DEPENDS foo` where foo is optional → `AFTER foo`
 
 ---
 
@@ -388,9 +365,11 @@ HEALTHCHECK redis-cli -h localhost ping
 - Starts with `http://` or `https://` → HTTP check (expect 2xx)
 - Otherwise → Execute command (expect exit code 0)
 
+The runtime chooses where the check runs (inside the service's environment or outside it), how often it runs, and how many failures it tolerates.
+
 #### READINESS_TIMEOUT
 
-How long to wait for HEALTHCHECK to pass during startup.
+Maximum time for `HEALTHCHECK` to pass once the service's process has started. Without a `HEALTHCHECK` it has no effect.
 
 ```
 READINESS_TIMEOUT 120s
@@ -417,9 +396,8 @@ ONESHOT true
 
 **Behavior**:
 - Service runs to completion
-- Success determined by exit code
-- Creates ready marker file on success
-- Dependent services wait for completion
+- It succeeds when its process exits with code 0
+- Dependent services start after it succeeds
 
 #### DISABLED
 
@@ -432,13 +410,12 @@ DISABLED true
 **Default**: `false`
 
 **Behavior**:
-- Parsed and validated
-- Skipped during `orch up` unless explicitly named
-- Can be started explicitly: `orch up disabled-service`
+- Parsed and validated like any other service
+- Not started unless the runtime is asked to start it by name
 
 #### RECREATE
 
-Container recreation policy.
+Whether the runtime keeps what it created for the service.
 
 ```
 RECREATE always
@@ -448,10 +425,8 @@ RECREATE never
 **Default**: `never`
 
 **Values**:
-- `always`: Destroy and recreate container on every `orch create`
-- `never`: Keep existing container if present
-
-**Note**: Only applies to container-mode services.
+- `always`: Whatever the runtime created for the service (for a container service, its container) is discarded and created again each time the service is set up
+- `never`: What already exists is kept
 
 ---
 
@@ -474,10 +449,6 @@ RESTART on-failure
 - `always`: Always restart when process exits
 - `on-failure`: Restart only on non-zero exit code
 
-**Platform mapping**:
-- launchd: `KeepAlive` / `SuccessfulExit`
-- systemd: `Restart=`
-
 #### RESTART_DELAY
 
 Time to wait before restarting failed service.
@@ -488,10 +459,6 @@ RESTART_DELAY 1m
 ```
 
 **Default**: `1s`
-
-**Platform mapping**:
-- launchd: `ThrottleInterval`
-- systemd: `RestartSec=`
 
 #### START_LIMIT_BURST
 
@@ -521,7 +488,7 @@ START_LIMIT_INTERVAL 10s
 
 #### TIMEOUT_START
 
-Maximum time to wait for service to start/become ready.
+Maximum time for the service's process to start. Becoming healthy afterwards is bounded by `READINESS_TIMEOUT`.
 
 ```
 TIMEOUT_START 30s
@@ -541,10 +508,6 @@ TIMEOUT_STOP 30s
 
 **Default**: `10s`
 
-**Platform mapping**:
-- launchd: `ExitTimeOut`
-- systemd: `TimeoutStopSec=`
-
 ---
 
 ### Resource Limits
@@ -560,12 +523,7 @@ MEMORY 4G
 MEMORY 512M
 ```
 
-**Format**: Integer with unit suffix (K, M, G)
-
-**Platform mapping**:
-- Container: `--memory` flag
-- launchd host: Not enforced (advisory)
-- systemd host: `MemoryMax=`
+**Format**: Integer with unit suffix: `K` = 1024 bytes, `M` = 1024 K, `G` = 1024 M
 
 #### CPUS
 
@@ -578,11 +536,6 @@ CPUS 0.5
 
 **Format**: Number (can be fractional)
 
-**Platform mapping**:
-- Container: `--cpus` flag
-- launchd host: Not enforced (advisory)
-- systemd host: `CPUQuota=` (converted to percentage)
-
 #### CPU_QUOTA
 
 CPU percentage limit (more precise than CPUS for host services).
@@ -594,10 +547,6 @@ CPU_QUOTA 200%
 
 **Format**: Percentage (>100% allowed for multi-core)
 
-**Platform mapping**:
-- launchd: Not enforced
-- systemd: `CPUQuota=`
-
 #### LIMIT_NOFILE
 
 Maximum open file descriptors.
@@ -607,10 +556,6 @@ LIMIT_NOFILE 65536
 ```
 
 **Default**: System default
-
-**Platform mapping**:
-- launchd: `SoftResourceLimits` / `HardResourceLimits` → `NumberOfFiles`
-- systemd: `LimitNOFILE=`
 
 #### LIMIT_NPROC
 
@@ -622,10 +567,6 @@ LIMIT_NPROC 4096
 
 **Default**: System default
 
-**Platform mapping**:
-- launchd: `SoftResourceLimits` / `HardResourceLimits` → `NumberOfProcesses`
-- systemd: `LimitNPROC=`
-
 #### TASKS_MAX
 
 Maximum number of tasks (threads + processes).
@@ -633,10 +574,6 @@ Maximum number of tasks (threads + processes).
 ```
 TASKS_MAX 4096
 ```
-
-**Platform mapping**:
-- launchd: Not enforced
-- systemd: `TasksMax=`
 
 #### IO_WEIGHT
 
@@ -647,11 +584,7 @@ IO_WEIGHT 100
 IO_WEIGHT 500
 ```
 
-**Format**: 10-1000 (default 100)
-
-**Platform mapping**:
-- launchd: Not enforced
-- systemd: `IOWeight=`
+**Format**: 1-10000 (default 100)
 
 ---
 
@@ -662,37 +595,33 @@ IO_WEIGHT 500
 Destination for standard output.
 
 ```
-STDOUT logs/myapp.log
+STDOUT ~/logs/myapp.log
 STDOUT /var/log/myapp.log
 ```
 
-**Default**: Platform-specific
-- launchd: a per-service log file chosen by the runtime
-- systemd: journal
+**Default**: Chosen by the runtime.
 
 #### STDERR
 
 Destination for standard error.
 
 ```
-STDERR logs/myapp.err
+STDERR ~/logs/myapp.err
 STDERR /var/log/myapp.err
 ```
 
-**Default**: Platform-specific
-- launchd: a per-service log file chosen by the runtime
-- systemd: journal
+**Default**: Chosen by the runtime.
 
 ---
 
 ## File Composition (Overlay Model)
 
-Orchfile supports multi-file composition using a systemd drop-in inspired overlay model. A base Orchfile can be overlaid with environment-specific files (staging, CI, personal) that tune resources, ports, env vars, and dependencies without forking the entire file.
+Orchfile supports multi-file composition using an overlay model. A base Orchfile can be overlaid with environment-specific files (staging, CI, personal) that tune resources, ports, env vars, and dependencies without forking the entire file.
 
 ### Usage
 
 ```
-orch parse base.orch staging.orch personal.orch [--arg ...]
+orch resolve base.orch staging.orch personal.orch [--arg ...]
 orch validate base.orch staging.orch personal.orch [--arg ...]
 ```
 
@@ -763,7 +692,7 @@ Setting `FROM` in an overlay on a service that had `RUN` clears all host-only di
 
 ### CLEAR Directive
 
-The `CLEAR` directive resets a list-type field before applying overlay values. Without `CLEAR`, overlay values merge with (append to) base values.
+The `CLEAR` directive resets a list-type field before applying the block's values. It applies to the whole block wherever it appears in it. Without `CLEAR`, overlay values merge with (append to) base values.
 
 ```
 CLEAR ENV
@@ -816,9 +745,11 @@ Constraints C1–C5 are checked on the **merged result**; C6 is checked on each 
 
 ---
 
-## Relative Paths
+## Paths
 
-A relative path in `WORKDIR`, `ENV_FILE`, `STDOUT`, `STDERR`, or a `VOLUME` host source is relative to the **project directory**. The runtime chooses the project directory, typically the directory containing the base Orchfile. Relative paths are not resolved during parsing; they appear in the output as written.
+`WORKDIR`, `ENV_FILE`, `STDOUT`, `STDERR`, a `VOLUME` destination, and a `VOLUME` source that is not a volume name are paths. A path is absolute (`/var/log/app.log`) or starts with `~` (`~` or `~/logs/app.log`).
+
+`~` is the home directory of the user the service runs as. For a path on the host that belongs to a container service, it is the home directory of the user the runtime runs the service as. Paths appear in the output as written.
 
 ---
 
@@ -837,7 +768,7 @@ PUBLISH ${prometheus_port}:9090
 VOLUME prometheus-data:/prometheus
 ENV TSDB_PATH=/prometheus
 ENV TSDB_RETENTION=15d
-HEALTHCHECK promtool check health
+HEALTHCHECK http://localhost:9090/-/healthy
 RESTART on-failure
 RESTART_DELAY 5s
 
@@ -854,7 +785,7 @@ SERVICE grafana
 RUN grafana server --http-addr 0.0.0.0:${grafana_port}
 WORKDIR /var/lib/grafana
 ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-ENV_FILE .env.local
+ENV_FILE ~/.env.local
 REQUIRES prometheus loki
 AFTER localstack
 HEALTHCHECK http://localhost:${grafana_port}/api/health
@@ -873,22 +804,26 @@ ONESHOT true
 
 ---
 
-## Platform Implementation Notes
+## Output
 
-### macOS (launchd + Apple Containers)
+Resolving a set of Orchfiles merges them, expands every variable, checks every constraint, and yields one result. That result has a canonical form, which is itself an Orchfile:
 
-- Container services: Managed via `/usr/local/bin/container`
-- Host services: Managed via launchd plists in `~/Library/LaunchAgents`
-- Resource limits: Limited enforcement for host services (MEMORY/CPUS advisory only)
-- Logging: File-based, in a directory chosen by the runtime
+- `ORCH_VERSION` first, then one block per service, separated by blank lines, in the order the services first appear.
+- No `ARG` or `CLEAR` lines, and no variable references. A literal `${` is written `$${`.
+- In each block, `FROM` or `RUN` first, then the service's directives in this order: `ENTRYPOINT`, `CMD`, `PUBLISH`, `VOLUME`, `USER`, `STOP`, `RELOAD`, `WORKDIR`, `ENV`, `ENV_FILE`, `REQUIRES`, `AFTER`, `HEALTHCHECK`, `READINESS_TIMEOUT`, `ONESHOT`, `DISABLED`, `RECREATE`, `RESTART`, `RESTART_DELAY`, `START_LIMIT_BURST`, `START_LIMIT_INTERVAL`, `TIMEOUT_START`, `TIMEOUT_STOP`, `MEMORY`, `CPUS`, `CPU_QUOTA`, `LIMIT_NOFILE`, `LIMIT_NPROC`, `TASKS_MAX`, `IO_WEIGHT`, `STDOUT`, `STDERR`.
+- `ENV` lines are sorted by key. `REQUIRES` and `AFTER` are each one line. Other repeated directives keep their merged order.
+- A directive whose value equals its default is omitted (`ONESHOT false`, `DISABLED false`, `RECREATE never`, `RESTART no`, and `rw` on a `VOLUME`).
+- Ports are written without leading zeros, and a `VOLUME` destination without a trailing `/`.
 
-### Linux (systemd + podman)
+Resolving the canonical form yields the same canonical form. Two sets of Orchfiles are equivalent exactly when their canonical forms are byte-for-byte equal.
 
-- Container services: Managed via podman with systemd integration
-- Host services: Managed via systemd user units in `~/.config/systemd/user/`
-- Resource limits: Full cgroup v2 enforcement
-- Logging: journald by default, file override supported
+```
+ORCH_VERSION 1.0.0-rc
 
----
+SERVICE web
+FROM nginx
+PUBLISH 9090:80
+ENV MODE=staging
+```
 
-
+The [`conformance/`](conformance/) suite holds inputs with their expected canonical forms, and inputs that must be rejected.

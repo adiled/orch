@@ -1,0 +1,3 @@
+SERVICE web
+FROM nginx
+VOLUME ${data}/web:/data
