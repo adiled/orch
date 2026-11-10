@@ -14,7 +14,7 @@ PUBLISH ${prometheus_port}:9090
 VOLUME prometheus-data:/prometheus
 ENV TSDB_PATH=/prometheus
 ENV TSDB_RETENTION=15d
-HEALTHCHECK promtool check health
+HEALTHCHECK http://localhost:9090/-/healthy
 RESTART on-failure
 RESTART_DELAY 5s
 
