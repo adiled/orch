@@ -126,7 +126,7 @@ An override applies only to an ARG that one of the files declares. An override f
 
 **Variable expansion**: `${name}` in any directive value is replaced with that ARG's value.
 
-- `name` MUST be an ARG declared in one of the merged files. An undeclared name is an error. There are no built-in variables.
+- `name` MUST be an ARG declared in one of the merged files (C5).
 - `$${` produces a literal `${`. `RUN sh -c 'echo $${HOME}'` runs `sh -c 'echo ${HOME}'`. Any other `$` is ordinary text, so `$HOME` and `$$` need no escape.
 - An unclosed `${` or an empty `${}` is a parse error.
 - ARG defaults are literal. They may use `$${` but cannot reference other variables. Override values are used exactly as given.
@@ -833,9 +833,7 @@ Constraints (C1-C4) are validated on the **merged result**, not on individual fi
 
 ## Relative Paths
 
-A relative path in `WORKDIR`, `ENV_FILE`, `STDOUT`, `STDERR`, or a `VOLUME` host source is relative to the **project directory**. The runtime chooses the project directory, typically the directory containing the base Orchfile. The parser does not resolve paths; relative paths appear in its output unchanged.
-
-There are no built-in variables. A value the runtime must supply is declared as an ARG and passed as an override (see [ARG](#arg)).
+A relative path in `WORKDIR`, `ENV_FILE`, `STDOUT`, `STDERR`, or a `VOLUME` host source is relative to the **project directory**. The runtime chooses the project directory, typically the directory containing the base Orchfile. Relative paths are not resolved during parsing; they appear in the output as written.
 
 ---
 
