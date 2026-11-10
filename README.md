@@ -99,7 +99,7 @@ ORCH_ARG_port=9999 orch resolve Orchfile       # environment
 
 ## JSON
 
-`--json` prints the same result as JSON, for tools that would rather not read Orchfile syntax:
+`--json` prints the same result as JSON:
 
 ```sh
 orch resolve Orchfile --json | jq -r '.services[] | select(.mode == "container") | .image'
