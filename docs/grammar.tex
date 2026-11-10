@@ -93,29 +93,49 @@ The canonical source is \texttt{grammar.ebnf} in the repository root.
 \section{EBNF Grammar}
 % ============================================================================
 
-\subsection{Document Structure}
+\subsection{Lines}
 
 \begin{lstlisting}
-/* Directives start at column 0. Trailing whitespace on a line is not part of any value. */
+/* Lines. Directives start at column 0. Trailing whitespace on a line is not part of any value. */
 orchfile    ::= bom? line ( newline line )*   /* the final line ending is optional */
-line        ::= blank | comment | ( version | arg | service_decl | directive ) ws?
+line        ::= blank | comment | statement ws?
 blank       ::= ws*
 comment     ::= ws* '#' any*
 bom         ::= #xFEFF   /* optional UTF-8 byte-order mark; ignored */
+statement   ::= version | arg | service_decl | directive
 \end{lstlisting}
 
-\subsection{Top-level Declarations}
+\subsection{Document}
 
 \begin{lstlisting}
+/* Document. The statements of a file, in order, with blank and comment
+   lines removed, MUST form a document. */
+document    ::= version? arg* service_block*
 version     ::= 'ORCH_VERSION' ws version_number
 arg         ::= 'ARG' ws identifier '=' value
-service_decl ::= 'SERVICE' ws service_name
+\end{lstlisting}
+
+\subsection{Service Blocks}
+
+\begin{lstlisting}
+/* Service blocks. A block sets at most one mode. A block with neither FROM
+   nor RUN is an overlay block and takes its mode from another file (C1). */
+service_block  ::= service_decl ( container_body | host_body | overlay_body )
+service_decl   ::= 'SERVICE' ws service_name
+container_body ::= container_item* from_directive container_item*
+host_body      ::= host_item* run_directive host_item*
+overlay_body   ::= overlay_item*
+container_item ::= container_directive | common_directive | clear_directive | arg
+host_item      ::= host_directive | common_directive | clear_directive | arg
+overlay_item   ::= container_directive | host_directive | common_directive
+                 | clear_directive | arg
 \end{lstlisting}
 
 \subsection{Directives}
 
 \begin{lstlisting}
-directive   ::= mode_directive
+directive   ::= from_directive
+              | run_directive
               | container_directive
               | host_directive
               | common_directive
@@ -134,13 +154,14 @@ clearable_target
               | 'REQUIRES' | 'AFTER'
 \end{lstlisting}
 
-\subsubsection{Execution Mode (mutually exclusive per service)}
+\subsubsection{Execution Mode}
 
 \begin{lstlisting}
-/* Execution mode - mutually exclusive per service */
-mode_directive
+/* Execution mode */
+from_directive
             ::= 'FROM' ws image_ref
-              | 'RUN' ws command_string
+run_directive
+            ::= 'RUN' ws command_string
 \end{lstlisting}
 
 \subsubsection{Container-only Directives}
@@ -305,6 +326,7 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
 \bigskip
 
 % --- orchfile ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{orchfile}
 \medskip
 
@@ -324,10 +346,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr arrow,rounded corners] ([xshift=5mm]line.east) |- (nl.east);
   \draw[rr arrow,rounded corners] (nl.west) -| ([xshift=-5mm]line.west);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- arg ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{arg}
 \medskip
 
@@ -344,10 +368,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \node[rr nonterminal,join] {value};
   \node[rr point,join] {};
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- service_decl ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{service\_decl}
 \medskip
 
@@ -362,38 +388,42 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \node[rr nonterminal,join] {service\_name};
   \node[rr point,join] {};
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
-% --- mode_directive ---
-\noindent\textbf{mode\_directive}
+% --- service_block ---
+\noindent\begin{minipage}{\linewidth}
+\noindent\textbf{service\_block}
 \medskip
 
 \begin{tikzpicture}[node distance=5mm and 4mm]
   \node[rr point] (start) {};
+  \node[rr nonterminal,right=of start] (decl) {service\_decl};
 
-  \node[rr terminal,right=of start] (from) {FROM};
-  \node[rr nonterminal,right=of from] (img) {image\_ref};
+  \node[rr nonterminal,right=10mm of decl] (cb) {container\_body};
+  \node[rr nonterminal,below=4mm of cb] (hb) {host\_body};
+  \node[rr nonterminal,below=4mm of hb] (ob) {overlay\_body};
 
-  \node[rr terminal,below=8mm of from] (run) {RUN};
-  \node[rr nonterminal,right=of run] (cmd) {command\_string};
-
-  % end point to the right of the longer row
-  \path let \p1=(img.east), \p2=(cmd.east) in coordinate (endx) at ({max(\x1,\x2)+6mm}, 0);
+  % common exit, to the right of the longest branch
+  \path let \p1=(cb.east), \p2=(hb.east), \p3=(ob.east) in coordinate (endx) at ({max(\x1,\x2,\x3)+6mm}, 0);
   \node[rr point] (end) at (endx) {};
+  \coordinate (fork) at ([xshift=5mm]decl.east);
 
-  \draw[rr arrow] (start) -- (from);
-  \draw[rr arrow] (from) -- (img);
-  \draw[rr arrow] (img) -- (end);
-
-  \draw[rr line,rounded corners] (start.east) |- (run.west);
-  \draw[rr arrow] (run) -- (cmd);
-  \draw[rr line,rounded corners] (cmd.east) -| (end.south);
+  \draw[rr arrow] (start) -- (decl);
+  \draw[rr arrow] (decl) -- (cb);
+  \draw[rr line] (cb.east) -- (endx);
+  \draw[rr arrow,rounded corners] (fork) |- (hb.west);
+  \draw[rr arrow,rounded corners] (fork) |- (ob.west);
+  \draw[rr line,rounded corners] (hb.east) -| (endx);
+  \draw[rr line,rounded corners] (ob.east) -| (endx);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- container_directive ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{container\_directive}
 \medskip
 
@@ -452,10 +482,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr line,rounded corners] ([xshift=4mm]pa.east) -- ++(0,5mm) -| ([xshift=4mm]vm.east);
   \draw[rr line,rounded corners] (vm.east) -| (endx);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- bool ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{bool}
 \medskip
 
@@ -470,10 +502,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr line,rounded corners] (start.east) |- (f.west);
   \draw[rr line,rounded corners] (f.east) -| (end.south);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- restart_policy ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{restart\_policy}
 \medskip
 
@@ -491,10 +525,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr line,rounded corners] (start.east) |- (c.west);
   \draw[rr line,rounded corners] (c.east) -| (end.south);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- duration ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{duration}
 \medskip
 
@@ -511,10 +547,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr line,rounded corners] (int.east) |- ([xshift=-4mm]m.west) -- (m.west);
   \draw[rr line,rounded corners] (m.east) -| (end.south);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- memory_size ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{memory\_size}
 \medskip
 
@@ -534,10 +572,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr line,rounded corners] (int.east) |- ([xshift=-4mm]g.west) -- (g.west);
   \draw[rr line,rounded corners] (g.east) -| (end.south);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- service_name ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{service\_name} {\small(max 63 characters)}
 \medskip
 
@@ -567,10 +607,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
 
   \draw[rr line,dashed,rounded corners] (mid.north) ++ (0,3mm) -- ++(0,3mm) -| ([xshift=3mm]end.east) -- ++ (0,-3mm);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
 % --- var_ref ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{var\_ref}
 \medskip
 
@@ -586,8 +628,12 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \node[rr terminal,join] {\}};
   \node[rr point,join] {};
 \end{tikzpicture}
+\end{minipage}
+
+\bigskip
 
 % --- clear_directive ---
+\noindent\begin{minipage}{\linewidth}
 \noindent\textbf{clear\_directive}
 \medskip
 
@@ -619,6 +665,7 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr line,rounded corners] (clear.east) |- (aft.west);
   \draw[rr line,rounded corners] (aft.east) -| (end.south);
 \end{tikzpicture}
+\end{minipage}
 
 \bigskip
 
@@ -627,36 +674,39 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
 \section{Constraints}
 % ============================================================================
 
-The following constraints are enforced by the parser and cannot be expressed
-in the EBNF grammar alone:
+The grammar fixes the shape of each file: a service block sets at most one of
+\texttt{FROM} or \texttt{RUN}, and container-only or host-only directives
+appear only in a block of the matching mode or in an overlay block. The
+constraints below need information a single file's syntax does not carry:
+other files, declared names, the dependency graph, or whether a value repeats.
 
 \begin{description}
-  \item[C1: FROM XOR RUN] A service must specify exactly one of \texttt{FROM}
-    (container mode) or \texttt{RUN} (host mode). Both or neither is an error.
+  \item[C1: Every service has a mode] After all files are merged, some block
+    for each service sets \texttt{FROM} (container mode) or \texttt{RUN} (host
+    mode).
 
   \item[C2: Container-only directives] \texttt{ENTRYPOINT}, \texttt{CMD},
-    \texttt{PUBLISH}, \texttt{VOLUME} are only valid with \texttt{FROM}.
+    \texttt{PUBLISH} and \texttt{VOLUME} in an overlay block require the merged
+    service to be in container mode.
 
-  \item[C3: Host-only directives] \texttt{USER}, \texttt{STOP},
-    \texttt{RELOAD} are only valid with \texttt{RUN}.
+  \item[C3: Host-only directives] \texttt{USER}, \texttt{STOP} and
+    \texttt{RELOAD} in an overlay block require the merged service to be in
+    host mode.
 
   \item[C4: Dependency acyclicity] \texttt{REQUIRES} and \texttt{AFTER}
-    edges must form a directed acyclic graph (DAG). Cycles are a parse error.
+    edges must form a directed acyclic graph (DAG).
 
   \item[C5: Declared variables] Every \texttt{\$\{name\}} must name an
     \texttt{ARG} declared in one of the merged files.
 
-  \item[C6: One entry per key] Within a service, each container port is
-    published at most once (\texttt{PUBLISH}) and each destination is mounted
-    at most once (\texttt{VOLUME}).
-
-  \item[C7: No repeats within a file] Within one file, a service sets each
-    scalar directive and each \texttt{ENV} key at most once. Across files,
-    overlays replace values.
+  \item[C6: No repeats within a file] Within one file, a service sets each
+    scalar directive, each \texttt{ENV} key and each \texttt{VOLUME}
+    destination at most once. Across files, overlays replace values.
 \end{description}
 
-\noindent Numeric ranges noted in the grammar's comments (ports 1--65535, IPv4
+\noindent Numeric ranges in the grammar's comments (ports 1--65535, IPv4
 octets 0--255, hostname labels and service names up to 63 characters,
-\texttt{IO\_WEIGHT} 10--1000) are also enforced by the parser.
+\texttt{IO\_WEIGHT} 10--1000) are part of the grammar; they are written as
+comments because spelling them out in EBNF adds length, not information.
 
 \end{document}

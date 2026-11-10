@@ -37,42 +37,31 @@ The formal grammar is defined in W3C EBNF in [`grammar.ebnf`](grammar.ebnf). A t
 
 ## Constraints
 
-### C1: FROM XOR RUN
+The grammar fixes the shape of each file. A service block sets at most one of `FROM` or `RUN`, and container-only or host-only directives appear only in a block of the matching mode or in an overlay block (one that sets neither). The constraints below need information a single file's syntax does not carry: other files, declared names, the dependency graph, or whether a value repeats.
 
-A service MUST specify exactly one of `FROM` (container mode) or `RUN` (host mode). Specifying both is a parse error. Specifying neither is a parse error.
+### C1: Every Service Has a Mode
+
+After all files are merged, every service MUST have a mode: some block for it sets `FROM` (container mode) or `RUN` (host mode).
 
 ```
-SERVICE valid-container
-FROM postgres:15
-CMD -c config_file=/etc/postgres.conf
+# base.orch
+SERVICE web
+FROM nginx
 
-SERVICE valid-host
-RUN python manage.py runserver
-
-SERVICE invalid
-FROM postgres:15
-# ERROR: Cannot specify both FROM and RUN
-RUN postgres
+# overlay.orch
+SERVICE web
+ENV MODE=staging
 ```
+
+Merging `base.orch` and `overlay.orch` is valid: `web` is a container service. Parsing `overlay.orch` alone fails C1.
 
 ### C2: Container-Only Directives
 
-The following directives are only valid in container mode (with `FROM`):
-- `ENTRYPOINT`
-- `CMD`
-- `PUBLISH`
-- `VOLUME`
-
-Using these with `RUN` is a parse error.
+`ENTRYPOINT`, `CMD`, `PUBLISH` and `VOLUME` in an overlay block require the merged service to be in container mode.
 
 ### C3: Host-Only Directives
 
-The following directives are only valid in host mode (with `RUN`):
-- `USER`
-- `STOP`
-- `RELOAD`
-
-Using these with `FROM` is a parse error.
+`USER`, `STOP` and `RELOAD` in an overlay block require the merged service to be in host mode.
 
 ### C4: Dependency Acyclicity
 
@@ -82,13 +71,9 @@ Service dependencies defined by `REQUIRES` and `AFTER` MUST form a directed acyc
 
 Every `${name}` MUST name an ARG declared in one of the merged files. An undeclared name is a parse error. See [ARG](#arg).
 
-### C6: One Entry per Key
+### C6: No Repeats Within a File
 
-Within a service, each container port is published at most once (`PUBLISH`) and each destination is mounted at most once (`VOLUME`). A second entry for the same key is a parse error. Overlays replace entries by key (see [File Composition](#file-composition-overlay-model)).
-
-### C7: No Repeats Within a File
-
-Within one file, a service sets each scalar directive (`CMD`, `MEMORY`, `WORKDIR`, ...) at most once, and each `ENV` key at most once. A repeat is a parse error. Across files, overlays replace values.
+Within one file, a service sets each scalar directive (`CMD`, `MEMORY`, `WORKDIR`, ...) at most once, each `ENV` key at most once, and each `VOLUME` destination at most once. A repeat is a parse error. Across files, overlays replace values.
 
 ---
 
@@ -98,7 +83,7 @@ Within one file, a service sets each scalar directive (`CMD`, `MEMORY`, `WORKDIR
 
 #### ORCH_VERSION
 
-Asserts the Orchfile spec version the file targets. Optional, but if present it must be the first directive and appear before any `SERVICE`. A version that the parser does not support is a parse error.
+Asserts the Orchfile spec version the file targets. Optional. If present, it is the first statement of the file: only blank lines and comments may precede it. A version that the parser does not support is a parse error.
 
 ```
 ORCH_VERSION 1.0.0-rc
@@ -110,7 +95,7 @@ This is the version of the **Orchfile specification** (currently `1.0.0-rc`), wh
 
 #### ARG
 
-Defines a variable with default value, overridable at parse time.
+Defines a variable with default value, overridable at parse time. An ARG may appear before the first service block or inside one; either way it applies to all merged files.
 
 ```
 ARG postgres_port=5433
@@ -151,7 +136,7 @@ With `--arg data_dir=/srv/data`, the volume source becomes `/srv/data/postgres`.
 
 #### SERVICE
 
-Begins a new service block. All subsequent directives until the next `SERVICE` apply to this service.
+Begins a new service block. All subsequent directives until the next `SERVICE` apply to this service. Every directive other than `ORCH_VERSION` and `ARG` belongs to a service block.
 
 ```
 SERVICE postgres
@@ -164,7 +149,7 @@ SERVICE socat-proxy
 - Must start with letter
 - Maximum 63 characters
 
-**Repeats**: Within one file, a service sets each scalar directive and each `ENV` key at most once (C7).
+**Repeats**: Within one file, a service sets each scalar directive, each `ENV` key and each `VOLUME` destination at most once (C6).
 
 ---
 
@@ -229,7 +214,7 @@ PUBLISH 127.0.0.1:8080:80
 
 **Host address**: Optional. When given, the published port binds only to that address (e.g. `127.0.0.1`); when omitted, the platform default applies (typically all interfaces). The address is an IPv4 address, an IPv6 address written without brackets (`PUBLISH ::1:8080:80`), or a hostname. A hostname is not resolved during parsing; it appears in the output as written.
 
-**Multiple allowed**: Specify multiple PUBLISH directives for multiple port mappings. Each container port is published at most once per service (C6).
+**Multiple allowed**: Specify multiple PUBLISH directives for multiple port mappings. A container port may be published more than once, for example on both `127.0.0.1:8080:80` and `::1:8080:80`.
 
 #### VOLUME
 
@@ -733,7 +718,7 @@ FROM nginx:1.25
 #### Keyed Lists: Merge by Key
 
 - **ENV**: Merged by variable name (overlay wins on conflict)
-- **PUBLISH**: Merged by container port (overlay replaces host address and port for same container port)
+- **PUBLISH**: Merged by container port (an overlay's mappings for a container port replace all base mappings for that port)
 - **VOLUME**: Merged by destination path (overlay replaces source and mode for same destination)
 
 ```
@@ -827,7 +812,7 @@ CLI `--arg` overrides take highest priority, above all file defaults.
 
 ### Validation
 
-Constraints (C1-C4) are validated on the **merged result**, not on individual files. An overlay file that only sets `ENV` without `FROM` or `RUN` is valid — it inherits the mode from the base file.
+Constraints C1–C5 are checked on the **merged result**; C6 is checked on each file. An overlay block that sets neither `FROM` nor `RUN` takes its mode from another file.
 
 ---
 

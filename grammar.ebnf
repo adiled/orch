@@ -1,15 +1,31 @@
-/* Directives start at column 0. Trailing whitespace on a line is not part of any value. */
+/* Lines. Directives start at column 0. Trailing whitespace on a line is not part of any value. */
 orchfile    ::= bom? line ( newline line )*   /* the final line ending is optional */
-line        ::= blank | comment | ( version | arg | service_decl | directive ) ws?
+line        ::= blank | comment | statement ws?
 blank       ::= ws*
 comment     ::= ws* '#' any*
 bom         ::= #xFEFF   /* optional UTF-8 byte-order mark; ignored */
+statement   ::= version | arg | service_decl | directive
 
+/* Document. The statements of a file, in order, with blank and comment
+   lines removed, MUST form a document. */
+document    ::= version? arg* service_block*
 version     ::= 'ORCH_VERSION' ws version_number
 arg         ::= 'ARG' ws identifier '=' value
-service_decl ::= 'SERVICE' ws service_name
 
-directive   ::= mode_directive
+/* Service blocks. A block sets at most one mode. A block with neither FROM
+   nor RUN is an overlay block and takes its mode from another file (C1). */
+service_block  ::= service_decl ( container_body | host_body | overlay_body )
+service_decl   ::= 'SERVICE' ws service_name
+container_body ::= container_item* from_directive container_item*
+host_body      ::= host_item* run_directive host_item*
+overlay_body   ::= overlay_item*
+container_item ::= container_directive | common_directive | clear_directive | arg
+host_item      ::= host_directive | common_directive | clear_directive | arg
+overlay_item   ::= container_directive | host_directive | common_directive
+                 | clear_directive | arg
+
+directive   ::= from_directive
+              | run_directive
               | container_directive
               | host_directive
               | common_directive
@@ -23,10 +39,11 @@ clearable_target
             ::= 'ENV' | 'ENV_FILE' | 'PUBLISH' | 'VOLUME'
               | 'REQUIRES' | 'AFTER'
 
-/* Execution mode - mutually exclusive per service */
-mode_directive
+/* Execution mode */
+from_directive
             ::= 'FROM' ws image_ref
-              | 'RUN' ws command_string
+run_directive
+            ::= 'RUN' ws command_string
 
 /* Container-only */
 container_directive
