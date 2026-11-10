@@ -227,7 +227,7 @@ PUBLISH 127.0.0.1:8080:80
 
 **Format**: `[address:]host_port:container_port`
 
-**Host address**: Optional. When given, the published port binds only to that address (e.g. `127.0.0.1`); when omitted, the platform default applies (typically all interfaces). The address is an IPv4 address, an IPv6 address written without brackets (`PUBLISH ::1:8080:80`), or a hostname. Platform tooling resolves a hostname; the parser only checks its syntax.
+**Host address**: Optional. When given, the published port binds only to that address (e.g. `127.0.0.1`); when omitted, the platform default applies (typically all interfaces). The address is an IPv4 address, an IPv6 address written without brackets (`PUBLISH ::1:8080:80`), or a hostname. A hostname is not resolved during parsing; it appears in the output as written.
 
 **Multiple allowed**: Specify multiple PUBLISH directives for multiple port mappings. Each container port is published at most once per service (C6).
 

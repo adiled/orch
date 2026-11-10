@@ -136,7 +136,6 @@ port        ::= digit+   /* 1-65535 */
 version_number ::= integer '.' integer '.' integer ( '-' prerelease )?
 prerelease  ::= ( letter | digit | '-' | '.' )+   /* e.g. rc, beta.1 */
 
-/* A hostname is resolved by platform tooling, never by the parser. */
 host_address ::= ipv4 | ipv6 | hostname
 ipv4        ::= octet '.' octet '.' octet '.' octet
 octet       ::= digit+                          /* 0-255 */
