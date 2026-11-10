@@ -8,8 +8,6 @@
 
 Orchfile is a declarative specification for service orchestration. It describes *what* services exist, their relationships, and resource requirements. Platform-specific tooling implements *how* to run them.
 
-Orchfile is inspired by Containerfile's declarative simplicity, not docker-compose's configuration verbosity.
-
 ## Design Principles
 
 1. **Platform-agnostic specification** - Orchfile defines intent, not implementation
@@ -21,9 +19,13 @@ Orchfile is inspired by Containerfile's declarative simplicity, not docker-compo
 ## File Format
 
 - Plain text, line-oriented
-- UTF-8 encoding
-- Comments start with `#`
+- UTF-8 encoding. An optional byte-order mark at the start of the file is ignored.
+- Lines end with LF (`\n`) or CRLF (`\r\n`). The final line ending is optional.
+- No control characters other than tab.
+- A line whose first non-blank character is `#` is a comment. A `#` anywhere else is part of the value: `ENV COLOR=#ff0000 # red` sets `COLOR` to `#ff0000 # red`.
 - Blank lines ignored
+- Directives start at the beginning of the line (no indentation)
+- Trailing whitespace on a line is ignored and is never part of a value
 - Case-sensitive directives (uppercase)
 - No continuation lines (each directive is one line)
 
@@ -31,49 +33,47 @@ Orchfile is inspired by Containerfile's declarative simplicity, not docker-compo
 
 The formal grammar is defined in W3C EBNF in [`grammar.ebnf`](grammar.ebnf). A typeset version with railroad diagrams is available in [`docs/grammar.pdf`](docs/grammar.pdf).
 
-**Notes**: `var_ref` (`${name}`) may appear within any `value`, `path`, `image_ref`, or `command_string`. Expansion is performed at parse time using resolved ARG values. Unresolved references to built-in variables (e.g. `${ORCH_PROJECT}`) are preserved for runtime resolution.
+**Notes**: The grammar describes each value *after* variable expansion. `var_ref` (`${name}`) may appear anywhere in the value of a directive inside a SERVICE block (not in `SERVICE`, `ARG`, `ORCH_VERSION` or `CLEAR` lines), and `var_escape` (`$${`) stands for a literal `${`. With `ARG port=8080`, `PUBLISH ${port}:80` is checked as `PUBLISH 8080:80`. Expansion rules are under [ARG](#arg).
 
 ## Constraints
 
-### C1: FROM XOR RUN
+The grammar fixes the shape of each file. A service block sets at most one of `FROM` or `RUN`, and container-only or host-only directives appear only in a block of the matching mode or in an overlay block (one that sets neither). The constraints below need information a single file's syntax does not carry: other files, declared names, the dependency graph, or whether a value repeats.
 
-A service MUST specify exactly one of `FROM` (container mode) or `RUN` (host mode). Specifying both is a parse error. Specifying neither is a parse error.
+### C1: Every Service Has a Mode
+
+After all files are merged, every service MUST have a mode: some block for it sets `FROM` (container mode) or `RUN` (host mode).
 
 ```
-SERVICE valid-container
-FROM postgres:15
-CMD -c config_file=/etc/postgres.conf
+# base.orch
+SERVICE web
+FROM nginx
 
-SERVICE valid-host
-RUN python manage.py runserver
-
-SERVICE invalid
-FROM postgres:15
-RUN postgres           # ERROR: Cannot specify both FROM and RUN
+# overlay.orch
+SERVICE web
+ENV MODE=staging
 ```
+
+Merging `base.orch` and `overlay.orch` is valid: `web` is a container service. Parsing `overlay.orch` alone fails C1.
 
 ### C2: Container-Only Directives
 
-The following directives are only valid in container mode (with `FROM`):
-- `ENTRYPOINT`
-- `CMD`
-- `PUBLISH`
-- `VOLUME`
-
-Using these with `RUN` is a parse error.
+`ENTRYPOINT`, `CMD`, `PUBLISH` and `VOLUME` in an overlay block require the merged service to be in container mode.
 
 ### C3: Host-Only Directives
 
-The following directives are only valid in host mode (with `RUN`):
-- `USER`
-- `STOP`
-- `RELOAD`
-
-Using these with `FROM` is a parse error.
+`USER`, `STOP` and `RELOAD` in an overlay block require the merged service to be in host mode.
 
 ### C4: Dependency Acyclicity
 
 Service dependencies defined by `REQUIRES` and `AFTER` MUST form a directed acyclic graph (DAG). Cycles are a parse error.
+
+### C5: Declared Variables
+
+Every `${name}` MUST name an ARG declared in one of the merged files. An undeclared name is a parse error. See [ARG](#arg).
+
+### C6: No Repeats Within a File
+
+Within one file, a service sets each scalar directive (`CMD`, `MEMORY`, `WORKDIR`, ...) at most once, each `ENV` key at most once, and each `VOLUME` destination at most once. A repeat is a parse error. Across files, overlays replace values.
 
 ---
 
@@ -83,7 +83,7 @@ Service dependencies defined by `REQUIRES` and `AFTER` MUST form a directed acyc
 
 #### ORCH_VERSION
 
-Asserts the Orchfile spec version the file targets. Optional, but if present it must be the first directive and appear before any `SERVICE`. A version that the parser does not support is a parse error.
+Asserts the Orchfile spec version the file targets. Optional. If present, it is the first statement of the file: only blank lines and comments may precede it. A version that the parser does not support is a parse error.
 
 ```
 ORCH_VERSION 1.0.0-rc
@@ -95,7 +95,7 @@ This is the version of the **Orchfile specification** (currently `1.0.0-rc`), wh
 
 #### ARG
 
-Defines a variable with default value, overridable at parse time.
+Defines a variable with default value, overridable at parse time. An ARG may appear before the first service block or inside one; either way it applies to all merged files.
 
 ```
 ARG postgres_port=5433
@@ -107,7 +107,28 @@ ARG memory=4G
 2. Environment: `ORCH_ARG_name=value`
 3. Orchfile default
 
-**Variable expansion**: Use `${name}` syntax in any directive value.
+An override applies only to an ARG that one of the files declares. An override for an undeclared name is ignored.
+
+**Variable expansion**: `${name}` in any directive value is replaced with that ARG's value.
+
+- `name` MUST be an ARG declared in one of the merged files (C5).
+- `$${` produces a literal `${`. `RUN sh -c 'echo $${HOME}'` runs `sh -c 'echo ${HOME}'`. Any other `$` is ordinary text, so `$HOME` and `$$` need no escape.
+- An unclosed `${` or an empty `${}` is a parse error.
+- ARG defaults are literal. They may use `$${` but cannot reference other variables. Override values are used exactly as given.
+- ARG values from all files and overrides are combined first. Every value is then expanded before services are merged, so overlays merge on expanded values: with `ARG p=80`, a base `PUBLISH 8080:${p}` and an overlay `PUBLISH 9090:80` refer to the same container port. The parser's output contains no unexpanded references; any `${` in it came from a `$${` escape.
+- The expanded value is what must match the directive's grammar. `ARG web=8080:80` makes `PUBLISH ${web}` valid, and `ARG deps=db cache` makes `REQUIRES ${deps}` name two services.
+
+**Values supplied by a runtime**: A runtime that needs to provide a value, such as a data directory, passes it as an override. The Orchfile declares the ARG with a default, so it still parses on its own.
+
+```
+ARG data_dir=./.orch/data
+
+SERVICE postgres
+FROM postgres:15
+VOLUME ${data_dir}/postgres:/var/lib/postgresql/data
+```
+
+With `--arg data_dir=/srv/data`, the volume source becomes `/srv/data/postgres`.
 
 ---
 
@@ -115,7 +136,7 @@ ARG memory=4G
 
 #### SERVICE
 
-Begins a new service block. All subsequent directives until the next `SERVICE` apply to this service.
+Begins a new service block. All subsequent directives until the next `SERVICE` apply to this service. Every directive other than `ORCH_VERSION` and `ARG` belongs to a service block.
 
 ```
 SERVICE postgres
@@ -127,6 +148,8 @@ SERVICE socat-proxy
 - Lowercase alphanumeric and hyphens only
 - Must start with letter
 - Maximum 63 characters
+
+**Repeats**: Within one file, a service sets each scalar directive, each `ENV` key and each `VOLUME` destination at most once (C6).
 
 ---
 
@@ -189,9 +212,9 @@ PUBLISH 127.0.0.1:8080:80
 
 **Format**: `[address:]host_port:container_port`
 
-**Host address**: Optional. When given, the published port binds only to that address (e.g. `127.0.0.1`); when omitted, the platform default applies (typically all interfaces). IPv4, IPv6, and hostnames are accepted.
+**Host address**: Optional. When given, the published port binds only to that address (e.g. `127.0.0.1`); when omitted, the platform default applies (typically all interfaces). The address is an IPv4 address, an IPv6 address written without brackets (`PUBLISH ::1:8080:80`), or a hostname. A hostname is not resolved during parsing; it appears in the output as written.
 
-**Multiple allowed**: Specify multiple PUBLISH directives for multiple port mappings.
+**Multiple allowed**: Specify multiple PUBLISH directives for multiple port mappings. A container port may be published more than once, for example on both `127.0.0.1:8080:80` and `::1:8080:80`.
 
 #### VOLUME
 
@@ -200,14 +223,17 @@ Mount host path or named volume into container.
 ```
 VOLUME /host/path:/container/path
 VOLUME my-named-volume:/var/lib/data
-VOLUME ${ORCH_DATA}/postgres:/var/lib/postgresql/data
+VOLUME ./data/postgres:/var/lib/postgresql/data
+VOLUME ./config:/etc/app:ro
 ```
 
-**Format**: `source:destination`
+**Format**: `source:destination[:mode]`. Source and destination are non-empty and may not contain `:`.
 
-**Named volumes**: If source doesn't start with `/`, it's treated as a named volume (created if missing).
+**Mode**: `ro` mounts read-only; `rw` (the default) mounts read-write. Other mount options are not supported.
 
-**Multiple allowed**: Specify multiple VOLUME directives.
+**Host paths and named volumes**: A source starting with `/`, `./`, or `../` is a host path. Relative host paths are resolved against the project directory (see [Relative Paths](#relative-paths)). Any other source is a named volume, created if missing.
+
+**Multiple allowed**: Specify multiple VOLUME directives. Each destination is mounted at most once per service (C6).
 
 ---
 
@@ -269,7 +295,7 @@ WORKDIR orch
 WORKDIR /app
 ```
 
-**Relative paths**: Resolved against `${ORCH_PROJECT}`
+**Relative paths**: Resolved against the project directory (see [Relative Paths](#relative-paths))
 
 **Container mode**: Sets container working directory
 
@@ -296,8 +322,8 @@ ENV DATABASE_URL=postgres://localhost:5433/orch
 Load environment variables from file.
 
 ```
-ENV_FILE ${ORCH_PROJECT}/.env.local
-ENV_FILE ${ORCH_DATA}/secrets.env
+ENV_FILE .env.local
+ENV_FILE /etc/myapp/secrets.env
 ```
 
 **Format**: One `KEY=value` per line, `#` comments supported.
@@ -373,7 +399,7 @@ READINESS_TIMEOUT 30s
 
 **Default**: `90s`
 
-**Format**: Duration with unit suffix (s, m)
+**Format**: Integer with unit suffix (s, m)
 
 ---
 
@@ -534,7 +560,7 @@ MEMORY 4G
 MEMORY 512M
 ```
 
-**Format**: Number with unit suffix (K, M, G)
+**Format**: Integer with unit suffix (K, M, G)
 
 **Platform mapping**:
 - Container: `--memory` flag
@@ -636,12 +662,12 @@ IO_WEIGHT 500
 Destination for standard output.
 
 ```
-STDOUT ${ORCH_STATE_DIR}/logs/myapp.log
+STDOUT logs/myapp.log
 STDOUT /var/log/myapp.log
 ```
 
 **Default**: Platform-specific
-- launchd: `${ORCH_STATE_DIR}/logs/${SERVICE_NAME}.log`
+- launchd: a per-service log file chosen by the runtime
 - systemd: journal
 
 #### STDERR
@@ -649,12 +675,12 @@ STDOUT /var/log/myapp.log
 Destination for standard error.
 
 ```
-STDERR ${ORCH_STATE_DIR}/logs/myapp.err
+STDERR logs/myapp.err
 STDERR /var/log/myapp.err
 ```
 
 **Default**: Platform-specific
-- launchd: `${ORCH_STATE_DIR}/logs/${SERVICE_NAME}.err`
+- launchd: a per-service log file chosen by the runtime
 - systemd: journal
 
 ---
@@ -681,32 +707,32 @@ Any scalar directive (`FROM`, `RUN`, `WORKDIR`, `MEMORY`, `CPUS`, etc.) in an ov
 ```
 # base.orch
 SERVICE web
-  FROM nginx:1.24
-  MEMORY 1G
+FROM nginx:1.24
+MEMORY 1G
 
 # staging.orch — overrides image, preserves MEMORY
 SERVICE web
-  FROM nginx:1.25
+FROM nginx:1.25
 ```
 
 #### Keyed Lists: Merge by Key
 
 - **ENV**: Merged by variable name (overlay wins on conflict)
-- **PUBLISH**: Merged by container port (overlay replaces host address and port for same container port)
-- **VOLUME**: Merged by destination path (overlay replaces source for same destination)
+- **PUBLISH**: Merged by container port (an overlay's mappings for a container port replace all base mappings for that port)
+- **VOLUME**: Merged by destination path (overlay replaces source and mode for same destination)
 
 ```
 # base.orch
 SERVICE web
-  FROM nginx
-  ENV MODE=production
-  PUBLISH 8080:80
+FROM nginx
+ENV MODE=production
+PUBLISH 8080:80
 
 # staging.orch — MODE overridden, DEBUG added, port 80 remapped
 SERVICE web
-  ENV MODE=staging
-  ENV DEBUG=true
-  PUBLISH 9090:80
+ENV MODE=staging
+ENV DEBUG=true
+PUBLISH 9090:80
 ```
 
 #### Positional Lists: Append + Dedup
@@ -718,12 +744,12 @@ SERVICE web
 ```
 # base.orch
 SERVICE web
-  FROM nginx
-  REQUIRES db
+FROM nginx
+REQUIRES db
 
 # staging.orch — adds cache dependency
 SERVICE web
-  REQUIRES cache
+REQUIRES cache
 # Result: REQUIRES db cache
 ```
 
@@ -753,54 +779,46 @@ CLEAR AFTER
 ```
 # base.orch
 SERVICE web
-  FROM nginx
-  ENV OLD_KEY=old_value
-  ENV KEEP=this
+FROM nginx
+ENV OLD_KEY=old_value
+ENV KEEP=this
 
 # overlay.orch — wipe all env, start fresh
 SERVICE web
-  CLEAR ENV
-  ENV FRESH=new_value
+CLEAR ENV
+ENV FRESH=new_value
 # Result: only FRESH=new_value (OLD_KEY and KEEP are gone)
 ```
 
 ### ARG Scoping
 
-ARGs are merged left-to-right (last wins). Variable expansion is deferred until all files are merged, so overlays can redefine ARG defaults that affect the base file's `${var}` references.
+ARGs are merged left-to-right (last wins). ARG values from every file are combined before any value is expanded, so overlays can redefine ARG defaults that affect the base file's `${var}` references.
 
 ```
 # base.orch
 ARG port=8080
 SERVICE web
-  FROM nginx
-  PUBLISH ${port}:80
+FROM nginx
+PUBLISH ${port}:80
 
 # staging.orch
 ARG port=9090
 # Result: port=9090, so PUBLISH becomes 9090:80
 ```
 
+An ARG may be declared only in an overlay and used in the base file.
+
 CLI `--arg` overrides take highest priority, above all file defaults.
 
 ### Validation
 
-Constraints (C1-C4) are validated on the **merged result**, not on individual files. An overlay file that only sets `ENV` without `FROM` or `RUN` is valid — it inherits the mode from the base file.
+Constraints C1–C5 are checked on the **merged result**; C6 is checked on each file. An overlay block that sets neither `FROM` nor `RUN` takes its mode from another file.
 
 ---
 
-## Built-in Variables
+## Relative Paths
 
-Available for expansion in directive values:
-
-| Variable | Description |
-|----------|-------------|
-| `${ORCH_PROJECT}` | Project root directory |
-| `${ORCH_DATA}` | Data directory for persistent storage |
-| `${ORCH_STATE_DIR}` | Orchestrator state directory |
-| `${ORCH_CONTAINERS_DIR}` | Containers scripts directory |
-| `${SERVICE_NAME}` | Current service name (in STDOUT/STDERR) |
-| `${PORT_OFFSET}` | Port offset for parallel environments |
-| `${CONTAINER_PREFIX}` | Container name prefix |
+A relative path in `WORKDIR`, `ENV_FILE`, `STDOUT`, `STDERR`, or a `VOLUME` host source is relative to the **project directory**. The runtime chooses the project directory, typically the directory containing the base Orchfile. Relative paths are not resolved during parsing; they appear in the output as written.
 
 ---
 
@@ -836,7 +854,7 @@ SERVICE grafana
 RUN grafana server --http-addr 0.0.0.0:${grafana_port}
 WORKDIR /var/lib/grafana
 ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-ENV_FILE ${ORCH_PROJECT}/.env.local
+ENV_FILE .env.local
 REQUIRES prometheus loki
 AFTER localstack
 HEALTHCHECK http://localhost:${grafana_port}/api/health
@@ -862,7 +880,7 @@ ONESHOT true
 - Container services: Managed via `/usr/local/bin/container`
 - Host services: Managed via launchd plists in `~/Library/LaunchAgents`
 - Resource limits: Limited enforcement for host services (MEMORY/CPUS advisory only)
-- Logging: File-based in `${ORCH_STATE_DIR}/logs/`
+- Logging: File-based, in a directory chosen by the runtime
 
 ### Linux (systemd + podman)
 

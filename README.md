@@ -61,6 +61,8 @@ ORCH_ARG_postgres_port=9999 orch parse Orchfile
 
 **Priority order:** `--arg` flag > `ORCH_ARG_*` env var > Orchfile default.
 
+Every `${name}` must refer to a declared `ARG`; an undeclared name is an error. Write `$${` for a literal `${`, e.g. in a shell command: `RUN sh -c 'echo $${HOME}'`.
+
 ## Example Orchfile
 
 ```

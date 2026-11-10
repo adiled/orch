@@ -1,19 +1,37 @@
-orchfile    ::= ( line newline )*
-line        ::= blank | comment | version | arg | service_decl | directive
+/* Lines. Directives start at column 0. Trailing whitespace on a line is not part of any value. */
+orchfile    ::= bom? line ( newline line )*   /* the final line ending is optional */
+line        ::= blank | comment | statement ws?
 blank       ::= ws*
 comment     ::= ws* '#' any*
+bom         ::= #xFEFF   /* UTF-8 byte-order mark */
+statement   ::= version | arg | service_decl | directive
 
+/* Document. The statements of a file, in order, with blank and comment
+   lines removed, MUST form a document. */
+document    ::= version? arg* service_block*
 version     ::= 'ORCH_VERSION' ws version_number
 arg         ::= 'ARG' ws identifier '=' value
-service_decl ::= 'SERVICE' ws service_name
 
-directive   ::= mode_directive
+/* Service blocks. A block sets at most one of FROM and RUN. A block with
+   neither is an overlay block. */
+service_block  ::= service_decl ( container_body | host_body | overlay_body )
+service_decl   ::= 'SERVICE' ws service_name
+container_body ::= container_item* from_directive container_item*
+host_body      ::= host_item* run_directive host_item*
+overlay_body   ::= overlay_item*
+container_item ::= container_directive | common_directive | clear_directive | arg
+host_item      ::= host_directive | common_directive | clear_directive | arg
+overlay_item   ::= container_directive | host_directive | common_directive
+                 | clear_directive | arg
+
+directive   ::= from_directive
+              | run_directive
               | container_directive
               | host_directive
               | common_directive
               | clear_directive
 
-/* Overlay composition - resets a list-type directive before merge */
+/* Overlay composition */
 clear_directive
             ::= 'CLEAR' ws clearable_target
 
@@ -21,21 +39,22 @@ clearable_target
             ::= 'ENV' | 'ENV_FILE' | 'PUBLISH' | 'VOLUME'
               | 'REQUIRES' | 'AFTER'
 
-/* Execution mode - mutually exclusive per service */
-mode_directive
+/* Execution mode */
+from_directive
             ::= 'FROM' ws image_ref
-              | 'RUN' ws command_string
+run_directive
+            ::= 'RUN' ws command_string
 
 /* Container-only */
 container_directive
             ::= 'ENTRYPOINT' ws command_string
               | 'CMD' ws command_string
               | 'PUBLISH' ws ( host_address ':' )? port ':' port
-              | 'VOLUME' ws volume_source ':' path
+              | 'VOLUME' ws volume_source ':' volume_destination ( ':' volume_mode )?
 
 /* Host-only */
 host_directive
-            ::= 'USER' ws identifier
+            ::= 'USER' ws user_name
               | 'STOP' ws command_string
               | 'RELOAD' ws command_string
 
@@ -100,16 +119,26 @@ common_directive
 
 /* Terminals */
 service_name ::= letter ( letter | digit | '-' )*   /* max 63 chars */
-identifier  ::= letter ( letter | digit | '_' )*
-env_key     ::= ( letter | '_' ) ( letter | digit | '_' )*
+identifier  ::= ( alpha | '_' ) ( alpha | digit | '_' )*   /* ARG names */
+env_key     ::= identifier
+user_name   ::= ( alpha | digit | '_' ) ( alpha | digit | '_' | '-' | '.' )*
 
-image_ref   ::= ( any - newline )+
-command_string ::= ( any - newline )+
-path        ::= ( any - newline )+
-value       ::= ( any - newline )*
-url         ::= ( 'http://' | 'https://' ) ( any - newline )+
+volume_source      ::= volume_part   /* host path or named volume */
+volume_destination ::= volume_part   /* container path */
+volume_part ::= ( visible - ':' ) ( ( any - ':' )* ( visible - ':' ) )?
+volume_mode ::= 'ro' | 'rw'
 
+/* Free text. It never starts or ends with whitespace. */
+text        ::= visible ( any* visible )?
+image_ref   ::= text
+command_string ::= text
+path        ::= text
+value       ::= ( any* visible )?   /* after '='; may be empty */
+url         ::= ( 'http://' | 'https://' ) text
+
+/* var_ref and var_escape may appear anywhere in the value of a directive inside a service block. Each value must match its rule after expansion. */
 var_ref     ::= '${' identifier '}'
+var_escape  ::= '$${'                 /* a literal '${'; never starts a var_ref */
 
 bool        ::= 'true' | 'false'
 restart_policy ::= 'no' | 'always' | 'on-failure'
@@ -123,10 +152,20 @@ integer     ::= digit+
 port        ::= digit+   /* 1-65535 */
 version_number ::= integer '.' integer '.' integer ( '-' prerelease )?
 prerelease  ::= ( letter | digit | '-' | '.' )+   /* e.g. rc, beta.1 */
-host_address ::= ( letter | digit | '.' | ':' )+   /* IPv4, IPv6, or hostname */
+
+host_address ::= ipv4 | ipv6 | hostname
+ipv4        ::= octet '.' octet '.' octet '.' octet
+octet       ::= digit+                          /* 0-255 */
+ipv6        ::= ( hex_digit | ':' | '.' )+      /* RFC 4291 text form, without brackets */
+hostname    ::= label ( '.' label )*            /* RFC 1123 */
+label       ::= alnum ( ( alnum | '-' )* alnum )?   /* max 63 chars */
+alnum       ::= alpha | digit
+hex_digit   ::= digit | [a-fA-F]
 
 letter      ::= [a-z]
+alpha       ::= [a-zA-Z]
 digit       ::= [0-9]
 ws          ::= [ #x9]+
-newline     ::= #xA
-any         ::= [#x20-#xFFFF]
+newline     ::= #xA | #xD #xA
+any         ::= #x9 | [#x20-#x7E] | [#xA0-#xD7FF] | [#xE000-#x10FFFF]   /* no control characters except tab; no surrogates */
+visible     ::= any - [ #x9]

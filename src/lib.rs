@@ -9,6 +9,7 @@ pub mod merge;
 pub mod parser;
 pub mod resolve;
 pub mod types;
+mod vars;
 
 use std::collections::HashMap;
 

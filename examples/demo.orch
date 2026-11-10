@@ -31,7 +31,7 @@ SERVICE grafana
 RUN grafana server --http-addr 0.0.0.0:${grafana_port}
 WORKDIR /var/lib/grafana
 ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-ENV_FILE ${ORCH_PROJECT}/.env.local
+ENV_FILE .env.local
 REQUIRES prometheus loki
 AFTER localstack
 HEALTHCHECK http://localhost:${grafana_port}/api/health

@@ -144,6 +144,15 @@ pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<Orch
             continue;
         }
 
+        // `${...}` syntax is checked here, where the line is known. Whether
+        // each name is a declared ARG is checked after all files are merged.
+        if let Some(value) = value
+            && let Err(e) = crate::vars::split(value)
+        {
+            errors.push(ParseError::new(line_num, e).into());
+            continue;
+        }
+
         // ORCH_VERSION: file-global, must precede any SERVICE, asserts spec compatibility.
         if directive == "ORCH_VERSION" {
             if current_service.is_some() || !services.is_empty() {
@@ -709,9 +718,24 @@ fn parse_arg(value: &str, line: usize) -> Result<(String, String), ParseError> {
         )
     })?;
     let name = value[..eq_pos].to_string();
-    let default = value[eq_pos + 1..].to_string();
     if name.is_empty() {
         return Err(ParseError::new(line, "ARG name cannot be empty"));
+    }
+    // ARG defaults are literal: they may use the `$${` escape but cannot
+    // reference other variables.
+    let mut default = String::new();
+    for piece in crate::vars::split(&value[eq_pos + 1..]).map_err(|e| ParseError::new(line, e))? {
+        match piece {
+            crate::vars::Piece::Text(t) => default.push_str(t),
+            crate::vars::Piece::Var(v) => {
+                return Err(ParseError::new(
+                    line,
+                    format!(
+                        "ARG {name}: default cannot reference '${{{v}}}' (ARG defaults are literal; write $${{ for a literal ${{)"
+                    ),
+                ));
+            }
+        }
     }
     Ok((name, default))
 }
@@ -832,13 +856,87 @@ FROM postgres:15
     }
 
     #[test]
-    fn test_expansion__unresolved_builtin_preserved() {
+    fn test_expansion__undeclared_var_is_error() {
         let input = "SERVICE app\nRUN echo hi\nSTDOUT ${ORCH_STATE_DIR}/logs/app.log\n";
-        let orch = parse_ok(input);
-        assert_eq!(
-            orch.services[0].logging.stdout.as_ref().unwrap(),
-            "${ORCH_STATE_DIR}/logs/app.log"
+        let errors = parse_err(input);
+        assert_eq!(errors.len(), 1);
+        let msg = errors[0].to_string();
+        assert!(msg.contains("service 'app'"), "{msg}");
+        assert!(
+            msg.contains("undefined variable '${ORCH_STATE_DIR}'"),
+            "{msg}"
         );
+    }
+
+    #[test]
+    fn test_expansion__undeclared_var_reported_before_type_error() {
+        let errors = parse_err("SERVICE x\nFROM img\nPUBLISH ${port}:80\n");
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("undefined variable '${port}'")
+        );
+    }
+
+    #[test]
+    fn test_expansion__escape_is_literal() {
+        let orch = parse_ok("SERVICE x\nRUN sh -c 'echo $${HOME}'\n");
+        assert_eq!(
+            orch.services[0].run_command.as_deref(),
+            Some("sh -c 'echo ${HOME}'")
+        );
+    }
+
+    #[test]
+    fn test_expansion__plain_dollar_untouched() {
+        let orch = parse_ok("SERVICE x\nRUN kill -HUP $MAINPID $$ $\n");
+        assert_eq!(
+            orch.services[0].run_command.as_deref(),
+            Some("kill -HUP $MAINPID $$ $")
+        );
+    }
+
+    #[test]
+    fn test_expansion__unclosed_ref_is_parse_error_with_line() {
+        let errors = parse_err("SERVICE x\nRUN echo ${oops\n");
+        let msg = errors[0].to_string();
+        assert!(msg.starts_with("parse error: line 2:"), "{msg}");
+        assert!(msg.contains("unclosed"), "{msg}");
+    }
+
+    #[test]
+    fn test_expansion__empty_ref_is_parse_error() {
+        let errors = parse_err("SERVICE x\nRUN echo ${}\n");
+        assert!(errors[0].to_string().contains("empty variable reference"));
+    }
+
+    #[test]
+    fn test_expansion__override_value_is_literal() {
+        let mut overrides = HashMap::new();
+        overrides.insert("a".to_string(), "${not_a_ref}".to_string());
+        let orch = parse_ok_with_args("ARG a=1\nSERVICE x\nRUN echo ${a}\n", &overrides);
+        assert_eq!(
+            orch.services[0].run_command.as_deref(),
+            Some("echo ${not_a_ref}")
+        );
+    }
+
+    #[test]
+    fn test_arg__default_cannot_reference_var() {
+        let errors = parse_err("ARG b=x\nARG a=${b}-y\nSERVICE x\nRUN echo ${a}\n");
+        let msg = errors[0].to_string();
+        assert!(msg.starts_with("parse error: line 2:"), "{msg}");
+        assert!(
+            msg.contains("ARG a: default cannot reference '${b}'"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_arg__default_escape_is_literal() {
+        let orch = parse_ok("ARG a=$${b}\nSERVICE x\nRUN echo ${a}\n");
+        assert_eq!(orch.args["a"], "${b}");
+        assert_eq!(orch.services[0].run_command.as_deref(), Some("echo ${b}"));
     }
 
     #[test]
@@ -1090,9 +1188,10 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
 
     #[test]
     fn test_container__volume_with_var() {
-        let orch = parse_ok("SERVICE x\nFROM img\nVOLUME ${ORCH_DATA}/pg:/var/lib/data\n");
+        let orch =
+            parse_ok("ARG data=/srv/data\nSERVICE x\nFROM img\nVOLUME ${data}/pg:/var/lib/data\n");
         assert!(!orch.services[0].volumes[0].is_named);
-        assert_eq!(orch.services[0].volumes[0].source, "${ORCH_DATA}/pg");
+        assert_eq!(orch.services[0].volumes[0].source, "/srv/data/pg");
     }
 
     #[test]
@@ -1460,7 +1559,7 @@ SERVICE grafana
 RUN grafana server --http-addr 0.0.0.0:${grafana_port}
 WORKDIR /var/lib/grafana
 ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-ENV_FILE ${ORCH_PROJECT}/.env.local
+ENV_FILE .env.local
 REQUIRES prometheus loki
 AFTER localstack
 HEALTHCHECK http://localhost:${grafana_port}/api/health
@@ -1874,6 +1973,23 @@ SERVICE web
         assert_eq!(orch.args.get("port").unwrap(), "9090");
         assert_eq!(orch.services[0].publish[0].host, 9090);
         assert_eq!(orch.services[0].env.get("APP_PORT").unwrap(), "9090");
+    }
+
+    #[test]
+    fn test_multifile__arg_declared_only_in_overlay() {
+        // Expansion runs after merge, so a base file may use an ARG that
+        // only an overlay declares (e.g. a runtime-generated overlay).
+        let base = "SERVICE web\nFROM nginx\nVOLUME ${data}/web:/data\n";
+        let overlay = "ARG data=/srv/data\n";
+        let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
+        assert_eq!(orch.services[0].volumes[0].source, "/srv/data/web");
+
+        let errors = parse_files_err(&[("base.orch", base)]);
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("undefined variable '${data}'")
+        );
     }
 
     #[test]
