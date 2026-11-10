@@ -1,6 +1,6 @@
 # orch
 
-Reference implementation of the [Orchfile specification](SPEC.md): a declarative description of the services on one node, for any backend.
+Reference implementation of the [Orchfile specification](SPEC.md), a declarative specification for service orchestration.
 
 `orch` merges one or more Orchfiles, expands their variables, checks every rule in the grammar and the spec, and prints the result as a single canonical Orchfile. A runtime such as [orchd](https://github.com/adiled/orchd) takes that result and runs it.
 
