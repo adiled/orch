@@ -144,6 +144,10 @@ print!("{}", the_orch::canonical::render(&resolved));
 cargo test
 ```
 
+## Changing the grammar
+
+Edit `grammar.ebnf`, then run `scripts/build_grammar_pdf.sh`. It copies the grammar into `docs/grammar.tex` and rebuilds `docs/grammar.pdf` (needs `pdflatex`). CI fails when the two are out of sync.
+
 ## License
 
 Apache 2.0
