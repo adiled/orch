@@ -93,8 +93,8 @@ orch resolve Orchfile --arg=port=9999          # same
 ORCH_ARG_port=9999 orch resolve Orchfile       # environment
 ```
 
-- `--arg` beats `ORCH_ARG_*`, which beats the default in the files.
-- Only an ARG declared in the files can be overridden. `orch` warns when an `--arg` names none.
+- `--arg` beats `ORCH_ARG_*`, which beats the default written on the `ARG` line.
+- Only a variable that has an `ARG` line in one of the given Orchfiles can be overridden. `orch` warns when an `--arg` names one that has none.
 - Every `${name}` must be a declared ARG. Write `$${` for a literal `${`, as in `RUN sh -c 'echo $${HOME}'`.
 
 ## JSON
