@@ -1,743 +1,125 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::{OrchError, ParseError};
+use crate::lex;
+use crate::merge::merged_services;
+use crate::syntax::{self, Document};
 use crate::types::*;
+use crate::value::{TypedBlock, typed_block};
 
-/// Validate a service name per spec: lowercase alphanumeric + hyphens,
-/// starts with letter, max 63 chars.
-fn validate_service_name(name: &str, line: usize) -> Result<(), ParseError> {
-    if name.is_empty() {
-        return Err(ParseError::new(line, "service name cannot be empty"));
-    }
-    if name.len() > 63 {
-        return Err(ParseError::new(
-            line,
-            format!(
-                "service name '{}' exceeds 63 character limit ({})",
-                name,
-                name.len()
-            ),
-        ));
-    }
-    let first = name.chars().next().unwrap();
-    if !first.is_ascii_lowercase() {
-        return Err(ParseError::new(
-            line,
-            format!("service name '{}' must start with a lowercase letter", name),
-        ));
-    }
-    for ch in name.chars() {
-        if !ch.is_ascii_lowercase() && !ch.is_ascii_digit() && ch != '-' {
-            return Err(ParseError::new(
-                line,
-                format!(
-                    "service name '{}' contains invalid character '{}' (only lowercase alphanumeric and hyphens allowed)",
-                    name, ch
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Top-level parser (delegates to parse_raw → merge → resolve pipeline)
-// ---------------------------------------------------------------------------
-
-/// Parse an Orchfile from string content (single-file convenience wrapper).
-///
-/// `overrides` are CLI/env arg overrides that take precedence over file defaults.
 pub fn parse(input: &str, overrides: &HashMap<String, String>) -> Result<OrchFile, Vec<OrchError>> {
-    let raw = parse_raw(input, 0)?;
-    let merged = crate::merge::merge(vec![raw]);
-    crate::resolve::resolve(merged, overrides, &[])
+    parse_sources(
+        &[Source {
+            name: None,
+            content: input,
+        }],
+        overrides,
+    )
 }
 
-/// Parse multiple Orchfiles and merge them left-to-right.
-///
-/// Each entry is (filename, content). Files are merged in order.
 pub fn parse_files(
     files: &[(&str, &str)],
     overrides: &HashMap<String, String>,
 ) -> Result<OrchFile, Vec<OrchError>> {
-    let mut raws = Vec::new();
-    for (i, (_name, content)) in files.iter().enumerate() {
-        match parse_raw(content, i) {
-            Ok(raw) => raws.push(raw),
-            Err(mut errs) => {
-                // Annotate errors with filename
-                for err in &mut errs {
-                    if let OrchError::Parse(pe) = err {
-                        pe.file = Some(files[i].0.to_string());
-                    }
-                }
-                return Err(errs);
-            }
-        }
-    }
-    let merged = crate::merge::merge(raws);
-    let file_names: Vec<String> = files.iter().map(|(name, _)| name.to_string()).collect();
-    crate::resolve::resolve(merged, overrides, &file_names)
+    let sources: Vec<Source> = files
+        .iter()
+        .map(|&(name, content)| Source {
+            name: Some(name),
+            content,
+        })
+        .collect();
+    parse_sources(&sources, overrides)
 }
 
-// =========================================================================
-// Raw parser: produces unexpanded intermediate representation
-// =========================================================================
-
-/// The set of directive names that CLEAR can target (list-type directives).
-const CLEARABLE_DIRECTIVES: &[&str] =
-    &["ENV", "ENV_FILE", "PUBLISH", "VOLUME", "REQUIRES", "AFTER"];
-
-/// Parse an Orchfile into a raw (unexpanded) intermediate representation.
-///
-/// No variable expansion, no type parsing (bools/numbers/enums), no constraint
-/// validation (C1-C4). Syntax errors (format, unknown directives, within-file
-/// duplicates) are still caught.
-pub fn parse_raw(input: &str, file_index: usize) -> Result<RawOrchFile, Vec<OrchError>> {
-    let mut args: HashMap<String, String> = HashMap::new();
-    let mut services: Vec<RawService> = Vec::new();
-    let mut errors: Vec<OrchError> = Vec::new();
-    let mut current_service: Option<RawService> = None;
-    let mut seen_service_names: HashMap<String, usize> = HashMap::new();
-    let mut orch_version_line: Option<usize> = None;
-
-    // Pass 1: collect ARG defaults (no override application — deferred to resolve)
-    for (line_num_0, raw_line) in input.lines().enumerate() {
-        let line_num = line_num_0 + 1;
-        let line = raw_line.trim();
-
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let (directive, value) = split_directive(line);
-        if directive == "ARG" {
-            if let Some(value) = value {
-                match parse_arg(value, line_num) {
-                    Ok((name, default)) => {
-                        args.insert(name, default);
-                    }
-                    Err(e) => errors.push(e.into()),
-                }
-            } else {
-                errors.push(ParseError::new(line_num, "ARG requires name=value").into());
-            }
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(errors);
-    }
-
-    // Pass 2: parse directives into RawService fields (no expansion, no validation)
-    for (line_num_0, raw_line) in input.lines().enumerate() {
-        let line_num = line_num_0 + 1;
-        let line = raw_line.trim();
-
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let (directive, value) = split_directive(line);
-
-        if directive == "ARG" {
-            continue;
-        }
-
-        // `${...}` syntax is checked here, where the line is known. Whether
-        // each name is a declared ARG is checked after all files are merged.
-        if let Some(value) = value
-            && let Err(e) = crate::vars::split(value)
-        {
-            errors.push(ParseError::new(line_num, e).into());
-            continue;
-        }
-
-        // ORCH_VERSION: file-global, must precede any SERVICE, asserts spec compatibility.
-        if directive == "ORCH_VERSION" {
-            if current_service.is_some() || !services.is_empty() {
-                errors.push(
-                    ParseError::new(line_num, "ORCH_VERSION must appear before any SERVICE").into(),
-                );
-                continue;
-            }
-            if let Some(prev) = orch_version_line {
-                errors.push(
-                    ParseError::new(
-                        line_num,
-                        format!(
-                            "duplicate ORCH_VERSION directive (first defined at line {})",
-                            prev
-                        ),
-                    )
-                    .into(),
-                );
-                continue;
-            }
-            orch_version_line = Some(line_num);
-            match value {
-                Some(v) if !v.is_empty() => {
-                    if v != ORCH_VERSION {
-                        errors.push(
-                            ParseError::new(
-                                line_num,
-                                format!(
-                                    "unsupported Orchfile version '{}' (this parser supports {})",
-                                    v, ORCH_VERSION
-                                ),
-                            )
-                            .into(),
-                        );
-                    }
-                }
-                _ => {
-                    errors.push(
-                        ParseError::new(line_num, "ORCH_VERSION requires a version value").into(),
-                    );
-                }
-            }
-            continue;
-        }
-
-        if directive == "SERVICE" {
-            // Finalize previous service
-            if let Some(svc) = current_service.take() {
-                services.push(svc);
-            }
-
-            let name = match value {
-                Some(n) => n.to_string(),
-                None => {
-                    errors.push(ParseError::new(line_num, "SERVICE requires a name").into());
-                    continue;
-                }
-            };
-
-            if let Err(e) = validate_service_name(&name, line_num) {
-                errors.push(e.into());
-                continue;
-            }
-
-            if let Some(prev_line) = seen_service_names.get(&name) {
-                errors.push(
-                    ParseError::new(
-                        line_num,
-                        format!(
-                            "duplicate service name '{}' (first defined at line {})",
-                            name, prev_line
-                        ),
-                    )
-                    .into(),
-                );
-                continue;
-            }
-            seen_service_names.insert(name.clone(), line_num);
-
-            current_service = Some(RawService::new(name, file_index));
-            continue;
-        }
-
-        // CLEAR directive
-        if directive == "CLEAR" {
-            let svc = match current_service.as_mut() {
-                Some(s) => s,
-                None => {
-                    errors.push(ParseError::new(line_num, "CLEAR outside of SERVICE block").into());
-                    continue;
-                }
-            };
-
-            let target = match value {
-                Some(t) if !t.is_empty() => t,
-                _ => {
-                    errors.push(
-                        ParseError::new(line_num, "CLEAR requires a target directive name").into(),
-                    );
-                    continue;
-                }
-            };
-
-            if !CLEARABLE_DIRECTIVES.contains(&target) {
-                // Check if it's a known scalar directive
-                let known_scalars = [
-                    "FROM",
-                    "RUN",
-                    "ENTRYPOINT",
-                    "CMD",
-                    "USER",
-                    "STOP",
-                    "RELOAD",
-                    "WORKDIR",
-                    "HEALTHCHECK",
-                    "READINESS_TIMEOUT",
-                    "ONESHOT",
-                    "DISABLED",
-                    "RECREATE",
-                    "RESTART",
-                    "RESTART_DELAY",
-                    "START_LIMIT_BURST",
-                    "START_LIMIT_INTERVAL",
-                    "TIMEOUT_START",
-                    "TIMEOUT_STOP",
-                    "MEMORY",
-                    "CPUS",
-                    "CPU_QUOTA",
-                    "LIMIT_NOFILE",
-                    "LIMIT_NPROC",
-                    "TASKS_MAX",
-                    "IO_WEIGHT",
-                    "STDOUT",
-                    "STDERR",
-                ];
-                if known_scalars.contains(&target) {
-                    errors.push(
-                        ParseError::new(
-                            line_num,
-                            format!(
-                                "CLEAR cannot target scalar directive '{}' (scalars override by last-wins)",
-                                target
-                            ),
-                        )
-                        .into(),
-                    );
-                } else {
-                    errors.push(
-                        ParseError::new(
-                            line_num,
-                            format!("CLEAR targets unknown directive '{}'", target),
-                        )
-                        .into(),
-                    );
-                }
-                continue;
-            }
-
-            match target {
-                "ENV" => {
-                    svc.env.cleared = true;
-                    svc.env.values.clear();
-                }
-                "ENV_FILE" => {
-                    svc.env_files.cleared = true;
-                    svc.env_files.values.clear();
-                }
-                "PUBLISH" => {
-                    svc.publish.cleared = true;
-                    svc.publish.values.clear();
-                }
-                "VOLUME" => {
-                    svc.volumes.cleared = true;
-                    svc.volumes.values.clear();
-                }
-                "REQUIRES" => {
-                    svc.requires.cleared = true;
-                    svc.requires.values.clear();
-                }
-                "AFTER" => {
-                    svc.after.cleared = true;
-                    svc.after.values.clear();
-                }
-                _ => unreachable!(),
-            }
-            continue;
-        }
-
-        // All other directives must be inside a SERVICE block
-        let svc = match current_service.as_mut() {
-            Some(s) => s,
-            None => {
-                errors.push(
-                    ParseError::new(
-                        line_num,
-                        format!("directive '{}' outside of SERVICE block", directive),
-                    )
-                    .into(),
-                );
-                continue;
-            }
-        };
-
-        // Store raw (unexpanded) value
-        let raw_val = value.map(|v| v.to_string());
-
-        match directive {
-            // -- Execution mode --
-            "FROM" => {
-                let val = require_raw_value(&raw_val, "FROM", line_num, &mut errors);
-                if let Some(v) = val {
-                    if svc.from.is_some() {
-                        errors.push(ParseError::new(line_num, "duplicate FROM directive").into());
-                    } else {
-                        svc.from = Some(v);
-                        svc.from_source = Some(Source::new(line_num, file_index));
-                    }
-                }
-            }
-            "RUN" => {
-                let val = require_raw_value(&raw_val, "RUN", line_num, &mut errors);
-                if let Some(v) = val {
-                    if svc.run.is_some() {
-                        errors.push(ParseError::new(line_num, "duplicate RUN directive").into());
-                    } else {
-                        svc.run = Some(v);
-                        svc.run_source = Some(Source::new(line_num, file_index));
-                    }
-                }
-            }
-
-            // -- Container-only --
-            "ENTRYPOINT" => {
-                svc.container_directives_used.push((
-                    "ENTRYPOINT".to_string(),
-                    line_num,
-                    file_index,
-                ));
-                let val = require_raw_value(&raw_val, "ENTRYPOINT", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.entrypoint = Some(v);
-                }
-            }
-            "CMD" => {
-                svc.container_directives_used
-                    .push(("CMD".to_string(), line_num, file_index));
-                let val = require_raw_value(&raw_val, "CMD", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.cmd = Some(v);
-                }
-            }
-            "PUBLISH" => {
-                svc.container_directives_used
-                    .push(("PUBLISH".to_string(), line_num, file_index));
-                let val = require_raw_value(&raw_val, "PUBLISH", line_num, &mut errors);
-                if let Some(v) = val {
-                    // `[address:]host_port:container_port`. Last two groups are
-                    // the ports; rsplit keeps ':'-bearing addresses (IPv6) intact.
-                    let parts: Vec<&str> = v.split(':').collect();
-                    if parts.len() < 2 {
-                        errors.push(
-                            ParseError::new(
-                                line_num,
-                                format!(
-                                    "invalid PUBLISH format '{}', expected [address:]host_port:container_port",
-                                    v
-                                ),
-                            )
-                            .into(),
-                        );
-                    } else {
-                        let container = parts[parts.len() - 1].to_string();
-                        let host_port = parts[parts.len() - 2].to_string();
-                        let address = parts[..parts.len() - 2].join(":");
-                        svc.publish.values.push((address, host_port, container));
-                    }
-                }
-            }
-            "VOLUME" => {
-                svc.container_directives_used
-                    .push(("VOLUME".to_string(), line_num, file_index));
-                let val = require_raw_value(&raw_val, "VOLUME", line_num, &mut errors);
-                if let Some(v) = val {
-                    let parts: Vec<&str> = v.splitn(2, ':').collect();
-                    if parts.len() != 2 {
-                        errors.push(
-                            ParseError::new(
-                                line_num,
-                                format!(
-                                    "invalid VOLUME format '{}', expected source:destination",
-                                    v
-                                ),
-                            )
-                            .into(),
-                        );
-                    } else {
-                        svc.volumes
-                            .values
-                            .push((parts[0].to_string(), parts[1].to_string()));
-                    }
-                }
-            }
-
-            // -- Host-only --
-            "USER" => {
-                svc.host_directives_used
-                    .push(("USER".to_string(), line_num, file_index));
-                let val = require_raw_value(&raw_val, "USER", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.user = Some(v);
-                }
-            }
-            "STOP" => {
-                svc.host_directives_used
-                    .push(("STOP".to_string(), line_num, file_index));
-                let val = require_raw_value(&raw_val, "STOP", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.stop_command = Some(v);
-                }
-            }
-            "RELOAD" => {
-                svc.host_directives_used
-                    .push(("RELOAD".to_string(), line_num, file_index));
-                let val = require_raw_value(&raw_val, "RELOAD", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.reload_command = Some(v);
-                }
-            }
-
-            // -- Common --
-            "WORKDIR" => {
-                let val = require_raw_value(&raw_val, "WORKDIR", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.workdir = Some(v);
-                }
-            }
-            "ENV" => {
-                let val = require_raw_value(&raw_val, "ENV", line_num, &mut errors);
-                if let Some(v) = val {
-                    match parse_env_raw(&v, line_num) {
-                        Ok((k, ev)) => {
-                            svc.env.values.insert(k, ev);
-                        }
-                        Err(e) => errors.push(e.into()),
-                    }
-                }
-            }
-            "ENV_FILE" => {
-                let val = require_raw_value(&raw_val, "ENV_FILE", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.env_files.values.push(v);
-                }
-            }
-            "REQUIRES" => {
-                let val = require_raw_value(&raw_val, "REQUIRES", line_num, &mut errors);
-                if let Some(v) = val {
-                    for dep in v.split_whitespace() {
-                        svc.requires.values.push(dep.to_string());
-                    }
-                }
-            }
-            "AFTER" => {
-                let val = require_raw_value(&raw_val, "AFTER", line_num, &mut errors);
-                if let Some(v) = val {
-                    for dep in v.split_whitespace() {
-                        svc.after.values.push(dep.to_string());
-                    }
-                }
-            }
-            "HEALTHCHECK" => {
-                let val = require_raw_value(&raw_val, "HEALTHCHECK", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.healthcheck = Some(v);
-                }
-            }
-            "READINESS_TIMEOUT" => {
-                let val = require_raw_value(&raw_val, "READINESS_TIMEOUT", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.readiness_timeout = Some(v);
-                }
-            }
-            "ONESHOT" => {
-                let val = require_raw_value(&raw_val, "ONESHOT", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.oneshot = Some(v);
-                }
-            }
-            "DISABLED" => {
-                let val = require_raw_value(&raw_val, "DISABLED", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.disabled = Some(v);
-                }
-            }
-            "RECREATE" => {
-                let val = require_raw_value(&raw_val, "RECREATE", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.recreate = Some(v);
-                }
-            }
-            "RESTART" => {
-                let val = require_raw_value(&raw_val, "RESTART", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.restart = Some(v);
-                }
-            }
-            "RESTART_DELAY" => {
-                let val = require_raw_value(&raw_val, "RESTART_DELAY", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.restart_delay = Some(v);
-                }
-            }
-            "START_LIMIT_BURST" => {
-                let val = require_raw_value(&raw_val, "START_LIMIT_BURST", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.start_limit_burst = Some(v);
-                }
-            }
-            "START_LIMIT_INTERVAL" => {
-                let val =
-                    require_raw_value(&raw_val, "START_LIMIT_INTERVAL", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.start_limit_interval = Some(v);
-                }
-            }
-            "TIMEOUT_START" => {
-                let val = require_raw_value(&raw_val, "TIMEOUT_START", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.timeout_start = Some(v);
-                }
-            }
-            "TIMEOUT_STOP" => {
-                let val = require_raw_value(&raw_val, "TIMEOUT_STOP", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.timeout_stop = Some(v);
-                }
-            }
-            "MEMORY" => {
-                let val = require_raw_value(&raw_val, "MEMORY", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.memory = Some(v);
-                }
-            }
-            "CPUS" => {
-                let val = require_raw_value(&raw_val, "CPUS", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.cpus = Some(v);
-                }
-            }
-            "CPU_QUOTA" => {
-                let val = require_raw_value(&raw_val, "CPU_QUOTA", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.cpu_quota = Some(v);
-                }
-            }
-            "LIMIT_NOFILE" => {
-                let val = require_raw_value(&raw_val, "LIMIT_NOFILE", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.limit_nofile = Some(v);
-                }
-            }
-            "LIMIT_NPROC" => {
-                let val = require_raw_value(&raw_val, "LIMIT_NPROC", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.limit_nproc = Some(v);
-                }
-            }
-            "TASKS_MAX" => {
-                let val = require_raw_value(&raw_val, "TASKS_MAX", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.tasks_max = Some(v);
-                }
-            }
-            "IO_WEIGHT" => {
-                let val = require_raw_value(&raw_val, "IO_WEIGHT", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.io_weight = Some(v);
-                }
-            }
-            "STDOUT" => {
-                let val = require_raw_value(&raw_val, "STDOUT", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.stdout = Some(v);
-                }
-            }
-            "STDERR" => {
-                let val = require_raw_value(&raw_val, "STDERR", line_num, &mut errors);
-                if let Some(v) = val {
-                    svc.stderr = Some(v);
-                }
-            }
-
-            _ => {
-                errors.push(
-                    ParseError::new(line_num, format!("unknown directive '{}'", directive)).into(),
-                );
-            }
-        }
-    }
-
-    // Finalize last service
-    if let Some(svc) = current_service.take() {
-        services.push(svc);
-    }
-
-    if !errors.is_empty() {
-        return Err(errors);
-    }
-
-    Ok(RawOrchFile { args, services })
+struct Source<'a> {
+    name: Option<&'a str>,
+    content: &'a str,
 }
 
-/// Helper to require a raw (unexpanded) value for a directive.
-fn require_raw_value(
-    raw_val: &Option<String>,
-    directive: &str,
-    line: usize,
-    errors: &mut Vec<OrchError>,
-) -> Option<String> {
-    match raw_val {
-        Some(v) if !v.is_empty() => Some(v.clone()),
-        _ => {
-            errors.push(ParseError::new(line, format!("{} requires a value", directive)).into());
-            None
-        }
+impl Source<'_> {
+    fn located(&self, errors: Vec<ParseError>) -> Vec<OrchError> {
+        errors
+            .into_iter()
+            .map(|error| match self.name {
+                Some(name) => error.with_file(name).into(),
+                None => error.into(),
+            })
+            .collect()
     }
 }
 
-/// Parse raw ENV "KEY=value" without variable expansion.
-fn parse_env_raw(value: &str, line: usize) -> Result<(String, String), ParseError> {
-    let eq_pos = value.find('=').ok_or_else(|| {
-        ParseError::new(
-            line,
-            format!("invalid ENV format '{}', expected KEY=value", value),
-        )
-    })?;
-    let key = value[..eq_pos].to_string();
-    let val = value[eq_pos + 1..].to_string();
-    if key.is_empty() {
-        return Err(ParseError::new(line, "ENV key cannot be empty"));
-    }
-    Ok((key, val))
+fn parse_sources(
+    sources: &[Source],
+    overrides: &HashMap<String, String>,
+) -> Result<OrchFile, Vec<OrchError>> {
+    let documents = documents(sources)?;
+    let args = resolved_args(&documents, overrides);
+    let blocks = typed_blocks(sources, documents, &args)?;
+    let file_names: Vec<Option<String>> = sources
+        .iter()
+        .map(|source| source.name.map(str::to_string))
+        .collect();
+    let services = merged_services(blocks, &file_names)?;
+    Ok(OrchFile {
+        version: ORCH_VERSION.to_string(),
+        args,
+        services,
+    })
 }
 
-// =========================================================================
-// Utility functions
-// =========================================================================
-
-/// Split a line into (DIRECTIVE, optional value).
-fn split_directive(line: &str) -> (&str, Option<&str>) {
-    match line.find(char::is_whitespace) {
-        Some(pos) => (&line[..pos], Some(line[pos..].trim_start())),
-        None => (line, None),
+fn documents(sources: &[Source]) -> Result<Vec<Document>, Vec<OrchError>> {
+    let mut documents = Vec::new();
+    let mut errors = Vec::new();
+    for source in sources {
+        match lex::statements(source.content).and_then(syntax::document) {
+            Ok(document) => documents.push(document),
+            Err(found) => errors.extend(source.located(found)),
+        }
+    }
+    if errors.is_empty() {
+        Ok(documents)
+    } else {
+        Err(errors)
     }
 }
 
-/// Parse "name=default" from ARG value.
-fn parse_arg(value: &str, line: usize) -> Result<(String, String), ParseError> {
-    let eq_pos = value.find('=').ok_or_else(|| {
-        ParseError::new(
-            line,
-            format!("invalid ARG format '{}', expected name=value", value),
-        )
-    })?;
-    let name = value[..eq_pos].to_string();
-    if name.is_empty() {
-        return Err(ParseError::new(line, "ARG name cannot be empty"));
+fn resolved_args(
+    documents: &[Document],
+    overrides: &HashMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut args: BTreeMap<String, String> = documents
+        .iter()
+        .flat_map(|document| &document.args)
+        .map(|arg| (arg.name.clone(), arg.default.clone()))
+        .collect();
+    for (name, value) in overrides {
+        if let Some(declared) = args.get_mut(name) {
+            *declared = value.clone();
+        }
     }
-    // ARG defaults are literal: they may use the `$${` escape but cannot
-    // reference other variables.
-    let mut default = String::new();
-    for piece in crate::vars::split(&value[eq_pos + 1..]).map_err(|e| ParseError::new(line, e))? {
-        match piece {
-            crate::vars::Piece::Text(t) => default.push_str(t),
-            crate::vars::Piece::Var(v) => {
-                return Err(ParseError::new(
-                    line,
-                    format!(
-                        "ARG {name}: default cannot reference '${{{v}}}' (ARG defaults are literal; write $${{ for a literal ${{)"
-                    ),
-                ));
+    args
+}
+
+fn typed_blocks(
+    sources: &[Source],
+    documents: Vec<Document>,
+    args: &BTreeMap<String, String>,
+) -> Result<Vec<TypedBlock>, Vec<OrchError>> {
+    let mut blocks = Vec::new();
+    let mut errors = Vec::new();
+    for (file, (source, document)) in sources.iter().zip(documents).enumerate() {
+        for block in document.blocks {
+            match typed_block(block, file, args) {
+                Ok(block) => blocks.push(block),
+                Err(found) => errors.extend(source.located(found)),
             }
         }
     }
-    Ok((name, default))
+    if errors.is_empty() {
+        Ok(blocks)
+    } else {
+        Err(errors)
+    }
 }
 
 #[cfg(test)]
@@ -758,10 +140,6 @@ mod tests {
     fn parse_err(input: &str) -> Vec<OrchError> {
         parse(input, &HashMap::new()).expect_err("parse should fail")
     }
-
-    // =========================================================================
-    // Tokenizer: comments and blank lines
-    // =========================================================================
 
     #[test]
     fn test_tokenizer__ignores_comments_and_blank_lines() {
@@ -790,10 +168,6 @@ FROM postgres:15
         let orch = parse_ok("# comment\n# another\n");
         assert!(orch.services.is_empty());
     }
-
-    // =========================================================================
-    // ARG parsing
-    // =========================================================================
 
     #[test]
     fn test_arg__basic_default() {
@@ -837,10 +211,6 @@ FROM postgres:15
         assert!(!errors.is_empty());
     }
 
-    // =========================================================================
-    // Variable expansion
-    // =========================================================================
-
     #[test]
     fn test_expansion__arg_in_publish() {
         let input = "ARG port=5433\nSERVICE db\nFROM postgres:15\nPUBLISH ${port}:5432\n";
@@ -861,7 +231,7 @@ FROM postgres:15
         let errors = parse_err(input);
         assert_eq!(errors.len(), 1);
         let msg = errors[0].to_string();
-        assert!(msg.contains("service 'app'"), "{msg}");
+        assert!(msg.contains("line 3"), "{msg}");
         assert!(
             msg.contains("undefined variable '${ORCH_STATE_DIR}'"),
             "{msg}"
@@ -948,10 +318,6 @@ FROM postgres:15
         assert_eq!(orch.services[0].image.as_ref().unwrap(), "postgres:16");
     }
 
-    // =========================================================================
-    // SERVICE declaration and naming
-    // =========================================================================
-
     #[test]
     fn test_service_name__valid_names() {
         for name in &["db", "my-app", "a1", "a-b-c-123"] {
@@ -1007,10 +373,6 @@ FROM postgres:15
         assert!(!errors.is_empty());
     }
 
-    // =========================================================================
-    // C1: FROM XOR RUN
-    // =========================================================================
-
     #[test]
     fn test_c1__from_only() {
         let orch = parse_ok("SERVICE db\nFROM postgres:15\n");
@@ -1032,7 +394,10 @@ FROM postgres:15
     fn test_c1__both_from_and_run() {
         let errors = parse_err("SERVICE bad\nFROM img\nRUN cmd\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C1")));
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("at most one of FROM and RUN"))
+        );
     }
 
     #[test]
@@ -1042,66 +407,54 @@ FROM postgres:15
         assert!(msgs.iter().any(|m| m.contains("C1")));
     }
 
-    // =========================================================================
-    // C2: Container-only directives
-    // =========================================================================
-
     #[test]
     fn test_c2__entrypoint_with_run() {
         let errors = parse_err("SERVICE bad\nRUN cmd\nENTRYPOINT /bin/sh\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C2")));
+        assert!(msgs.iter().any(|m| m.contains("container-only")));
     }
 
     #[test]
     fn test_c2__cmd_with_run() {
         let errors = parse_err("SERVICE bad\nRUN cmd\nCMD args\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C2")));
+        assert!(msgs.iter().any(|m| m.contains("container-only")));
     }
 
     #[test]
     fn test_c2__publish_with_run() {
         let errors = parse_err("SERVICE bad\nRUN cmd\nPUBLISH 80:80\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C2")));
+        assert!(msgs.iter().any(|m| m.contains("container-only")));
     }
 
     #[test]
     fn test_c2__volume_with_run() {
         let errors = parse_err("SERVICE bad\nRUN cmd\nVOLUME data:/data\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C2")));
+        assert!(msgs.iter().any(|m| m.contains("container-only")));
     }
-
-    // =========================================================================
-    // C3: Host-only directives
-    // =========================================================================
 
     #[test]
     fn test_c3__user_with_from() {
         let errors = parse_err("SERVICE bad\nFROM img\nUSER postgres\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C3")));
+        assert!(msgs.iter().any(|m| m.contains("host-only")));
     }
 
     #[test]
     fn test_c3__stop_with_from() {
         let errors = parse_err("SERVICE bad\nFROM img\nSTOP kill -9\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C3")));
+        assert!(msgs.iter().any(|m| m.contains("host-only")));
     }
 
     #[test]
     fn test_c3__reload_with_from() {
         let errors = parse_err("SERVICE bad\nFROM img\nRELOAD nginx -s reload\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("C3")));
+        assert!(msgs.iter().any(|m| m.contains("host-only")));
     }
-
-    // =========================================================================
-    // C4: Dependency acyclicity
-    // =========================================================================
 
     #[test]
     fn test_c4__simple_cycle() {
@@ -1147,10 +500,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         let orch = parse_ok(input);
         assert_eq!(orch.services.len(), 3);
     }
-
-    // =========================================================================
-    // Container-mode directives
-    // =========================================================================
 
     #[test]
     fn test_container__entrypoint() {
@@ -1206,10 +555,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         assert_eq!(orch.services[0].recreate, RecreatePolicy::Never);
     }
 
-    // =========================================================================
-    // Host-mode directives
-    // =========================================================================
-
     #[test]
     fn test_host__user() {
         let orch = parse_ok("SERVICE x\nRUN cmd\nUSER postgres\n");
@@ -1233,10 +578,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
             "nginx -s reload"
         );
     }
-
-    // =========================================================================
-    // Common directives
-    // =========================================================================
 
     #[test]
     fn test_common__workdir() {
@@ -1334,10 +675,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         assert!(!orch.services[0].disabled);
     }
 
-    // =========================================================================
-    // Restart policy
-    // =========================================================================
-
     #[test]
     fn test_restart__on_failure() {
         let orch = parse_ok("SERVICE x\nFROM img\nRESTART on-failure\n");
@@ -1381,10 +718,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         assert!(!errors.is_empty());
     }
 
-    // =========================================================================
-    // Timeouts
-    // =========================================================================
-
     #[test]
     fn test_timeout__start() {
         let orch = parse_ok("SERVICE x\nFROM img\nTIMEOUT_START 30s\n");
@@ -1396,10 +729,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         let orch = parse_ok("SERVICE x\nFROM img\nTIMEOUT_STOP 10s\n");
         assert_eq!(orch.services[0].timeouts.stop.as_ref().unwrap(), "10s");
     }
-
-    // =========================================================================
-    // Resource limits
-    // =========================================================================
 
     #[test]
     fn test_resources__memory() {
@@ -1461,10 +790,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         assert!(!errors.is_empty());
     }
 
-    // =========================================================================
-    // Logging
-    // =========================================================================
-
     #[test]
     fn test_logging__stdout() {
         let orch = parse_ok("SERVICE x\nFROM img\nSTDOUT /var/log/x.log\n");
@@ -1483,10 +808,6 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         );
     }
 
-    // =========================================================================
-    // REQUIRES references validation
-    // =========================================================================
-
     #[test]
     fn test_requires__unknown_service() {
         let errors = parse_err("SERVICE app\nRUN cmd\nREQUIRES nonexistent\n");
@@ -1496,14 +817,9 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
 
     #[test]
     fn test_after__unknown_service_allowed() {
-        // AFTER references are soft — missing targets are OK per spec
         let orch = parse_ok("SERVICE app\nRUN cmd\nAFTER nonexistent\n");
         assert_eq!(orch.services[0].after, vec!["nonexistent"]);
     }
-
-    // =========================================================================
-    // Unknown directive
-    // =========================================================================
 
     #[test]
     fn test_unknown_directive() {
@@ -1512,20 +828,12 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
         assert!(msgs.iter().any(|m| m.contains("unknown directive")));
     }
 
-    // =========================================================================
-    // Directive outside service block
-    // =========================================================================
-
     #[test]
     fn test_directive_outside_service() {
         let errors = parse_err("FROM img\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
         assert!(msgs.iter().any(|m| m.contains("outside of SERVICE block")));
     }
-
-    // =========================================================================
-    // Full example from spec
-    // =========================================================================
 
     #[test]
     fn test_full_spec_example() {
@@ -1578,8 +886,6 @@ ONESHOT true
         let orch = parse_ok(input);
 
         assert_eq!(orch.services.len(), 4);
-
-        // prometheus
         let prom = &orch.services[0];
         assert_eq!(prom.name, "prometheus");
         assert_eq!(prom.mode, ServiceMode::Container);
@@ -1592,14 +898,10 @@ ONESHOT true
         assert_eq!(prom.env["TSDB_RETENTION"], "15d");
         assert_eq!(prom.restart.policy, RestartPolicy::OnFailure);
         assert_eq!(prom.restart.delay.as_ref().unwrap(), "5s");
-
-        // loki
         let loki = &orch.services[1];
         assert_eq!(loki.name, "loki");
         assert_eq!(loki.recreate, RecreatePolicy::Always);
         assert_eq!(loki.restart.policy, RestartPolicy::Always);
-
-        // grafana
         let gf = &orch.services[2];
         assert_eq!(gf.name, "grafana");
         assert_eq!(gf.mode, ServiceMode::Host);
@@ -1612,17 +914,11 @@ ONESHOT true
         assert_eq!(gf.after, vec!["localstack"]);
         assert_eq!(gf.resources.limit_nofile.unwrap(), 65536);
         assert_eq!(gf.timeouts.start.as_ref().unwrap(), "60s");
-
-        // config-check
         let chk = &orch.services[3];
         assert_eq!(chk.name, "config-check");
         assert!(chk.oneshot);
         assert_eq!(chk.requires, vec!["prometheus"]);
     }
-
-    // =========================================================================
-    // JSON serialization
-    // =========================================================================
 
     #[test]
     fn test_json_serialization() {
@@ -1634,22 +930,24 @@ ONESHOT true
         assert!(json.contains("\"host\": 5432"));
     }
 
-    // =========================================================================
-    // Edge cases
-    // =========================================================================
-
     #[test]
     fn test_edge__duplicate_from() {
         let errors = parse_err("SERVICE x\nFROM img1\nFROM img2\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("duplicate FROM")));
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("at most one of FROM and RUN"))
+        );
     }
 
     #[test]
     fn test_edge__duplicate_run() {
         let errors = parse_err("SERVICE x\nRUN cmd1\nRUN cmd2\n");
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("duplicate RUN")));
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("at most one of FROM and RUN"))
+        );
     }
 
     #[test]
@@ -1693,16 +991,10 @@ ONESHOT true
     }
 
     #[test]
-    fn test_edge__indented_directives() {
-        // Spec says line-oriented and we trim — indented directives should work
-        let input = "SERVICE db\n  FROM postgres:15\n  PUBLISH 5432:5432\n";
-        let orch = parse_ok(input);
-        assert_eq!(orch.services[0].publish[0].host, 5432);
+    fn test_edge__indented_directives_are_rejected() {
+        let errors = parse_err("SERVICE db\n  FROM postgres:15\n");
+        assert!(errors[0].to_string().contains("column 0"));
     }
-
-    // =========================================================================
-    // Multi-file integration tests (parse_files through full pipeline)
-    // =========================================================================
 
     fn parse_files_ok(files: &[(&str, &str)]) -> OrchFile {
         parse_files(files, &HashMap::new()).expect("parse_files should succeed")
@@ -1723,12 +1015,12 @@ ONESHOT true
     fn test_multifile__scalar_override() {
         let base = r#"
 SERVICE web
-  FROM nginx:1.24
-  WORKDIR /app
+FROM nginx:1.24
+WORKDIR /app
     "#;
         let overlay = r#"
 SERVICE web
-  FROM nginx:1.25
+FROM nginx:1.25
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].image.as_deref(), Some("nginx:1.25"));
@@ -1739,14 +1031,14 @@ SERVICE web
     fn test_multifile__env_merge() {
         let base = r#"
 SERVICE web
-  FROM nginx
-  ENV MODE=production
-  ENV PORT=80
+FROM nginx
+ENV MODE=production
+ENV PORT=80
     "#;
         let overlay = r#"
 SERVICE web
-  ENV MODE=staging
-  ENV DEBUG=true
+ENV MODE=staging
+ENV DEBUG=true
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].env.get("MODE").unwrap(), "staging");
@@ -1758,13 +1050,13 @@ SERVICE web
     fn test_multifile__publish_merge_by_container_port() {
         let base = r#"
 SERVICE web
-  FROM nginx
-  PUBLISH 8080:80
-  PUBLISH 8443:443
+FROM nginx
+PUBLISH 8080:80
+PUBLISH 8443:443
     "#;
         let overlay = r#"
 SERVICE web
-  PUBLISH 9090:80
+PUBLISH 9090:80
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].publish.len(), 2);
@@ -1786,13 +1078,13 @@ SERVICE web
     fn test_multifile__volume_merge_by_dest() {
         let base = r#"
 SERVICE db
-  FROM postgres:15
-  VOLUME pgdata:/var/lib/postgresql/data
-  VOLUME ./config:/etc/postgresql
+FROM postgres:15
+VOLUME pgdata:/var/lib/postgresql/data
+VOLUME ./config:/etc/postgresql
     "#;
         let overlay = r#"
 SERVICE db
-  VOLUME ./local-config:/etc/postgresql
+VOLUME ./local-config:/etc/postgresql
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].volumes.len(), 2);
@@ -1809,21 +1101,21 @@ SERVICE db
     fn test_multifile__requires_append_dedup() {
         let base = r#"
 SERVICE db
-  FROM postgres:15
+FROM postgres:15
 
 SERVICE redis
-  FROM redis:7
+FROM redis:7
 
 SERVICE cache
-  FROM memcached
+FROM memcached
 
 SERVICE web
-  FROM nginx
-  REQUIRES db redis
+FROM nginx
+REQUIRES db redis
     "#;
         let overlay = r#"
 SERVICE web
-  REQUIRES redis cache
+REQUIRES redis cache
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         let web = orch.services.iter().find(|s| s.name == "web").unwrap();
@@ -1834,14 +1126,14 @@ SERVICE web
     fn test_multifile__clear_env() {
         let base = r#"
 SERVICE web
-  FROM nginx
-  ENV OLD_KEY=old_value
-  ENV KEEP=this
+FROM nginx
+ENV OLD_KEY=old_value
+ENV KEEP=this
     "#;
         let overlay = r#"
 SERVICE web
-  CLEAR ENV
-  ENV FRESH=new_value
+CLEAR ENV
+ENV FRESH=new_value
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert!(!orch.services[0].env.contains_key("OLD_KEY"));
@@ -1853,22 +1145,22 @@ SERVICE web
     fn test_multifile__clear_requires() {
         let base = r#"
 SERVICE db
-  FROM postgres:15
+FROM postgres:15
 
 SERVICE redis
-  FROM redis:7
+FROM redis:7
 
 SERVICE cache
-  FROM memcached
+FROM memcached
 
 SERVICE web
-  FROM nginx
-  REQUIRES db redis
+FROM nginx
+REQUIRES db redis
     "#;
         let overlay = r#"
 SERVICE web
-  CLEAR REQUIRES
-  REQUIRES cache
+CLEAR REQUIRES
+REQUIRES cache
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         let web = orch.services.iter().find(|s| s.name == "web").unwrap();
@@ -1879,14 +1171,14 @@ SERVICE web
     fn test_multifile__clear_publish() {
         let base = r#"
 SERVICE web
-  FROM nginx
-  PUBLISH 8080:80
-  PUBLISH 8443:443
+FROM nginx
+PUBLISH 8080:80
+PUBLISH 8443:443
     "#;
         let overlay = r#"
 SERVICE web
-  CLEAR PUBLISH
-  PUBLISH 9090:80
+CLEAR PUBLISH
+PUBLISH 9090:80
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].publish.len(), 1);
@@ -1898,13 +1190,13 @@ SERVICE web
     fn test_multifile__mode_switch_from_to_run() {
         let base = r#"
 SERVICE svc
-  FROM nginx:latest
-  ENTRYPOINT /docker-entrypoint.sh
-  PUBLISH 8080:80
+FROM nginx:latest
+ENTRYPOINT /docker-entrypoint.sh
+PUBLISH 8080:80
     "#;
         let overlay = r#"
 SERVICE svc
-  RUN /usr/local/bin/myapp
+RUN /usr/local/bin/myapp
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].mode, ServiceMode::Host);
@@ -1921,13 +1213,13 @@ SERVICE svc
     fn test_multifile__mode_switch_run_to_from() {
         let base = r#"
 SERVICE svc
-  RUN /usr/local/bin/myapp
-  USER nobody
-  STOP kill $MAINPID
+RUN /usr/local/bin/myapp
+USER nobody
+STOP kill $MAINPID
     "#;
         let overlay = r#"
 SERVICE svc
-  FROM myapp:latest
+FROM myapp:latest
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].mode, ServiceMode::Container);
@@ -1941,11 +1233,11 @@ SERVICE svc
     fn test_multifile__new_service_in_overlay() {
         let base = r#"
 SERVICE web
-  FROM nginx
+FROM nginx
     "#;
         let overlay = r#"
 SERVICE cache
-  FROM redis:7
+FROM redis:7
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services.len(), 2);
@@ -1959,17 +1251,16 @@ SERVICE cache
 ARG port=8080
 
 SERVICE web
-  FROM nginx
-  PUBLISH ${port}:80
+FROM nginx
+PUBLISH ${port}:80
     "#;
         let overlay = r#"
 ARG port=9090
 
 SERVICE web
-  ENV APP_PORT=${port}
+ENV APP_PORT=${port}
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
-        // ARG last wins: port=9090
         assert_eq!(orch.args.get("port").unwrap(), "9090");
         assert_eq!(orch.services[0].publish[0].host, 9090);
         assert_eq!(orch.services[0].env.get("APP_PORT").unwrap(), "9090");
@@ -1977,8 +1268,6 @@ SERVICE web
 
     #[test]
     fn test_multifile__arg_declared_only_in_overlay() {
-        // Expansion runs after merge, so a base file may use an ARG that
-        // only an overlay declares (e.g. a runtime-generated overlay).
         let base = "SERVICE web\nFROM nginx\nVOLUME ${data}/web:/data\n";
         let overlay = "ARG data=/srv/data\n";
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
@@ -1998,14 +1287,14 @@ SERVICE web
 ARG port=8080
 
 SERVICE web
-  FROM nginx
-  PUBLISH ${port}:80
+FROM nginx
+PUBLISH ${port}:80
     "#;
         let overlay = r#"
 ARG port=9090
 
 SERVICE web
-  ENV APP_PORT=${port}
+ENV APP_PORT=${port}
     "#;
         let mut overrides = HashMap::new();
         overrides.insert("port".to_string(), "3000".to_string());
@@ -2013,7 +1302,6 @@ SERVICE web
             &[("base.orch", base), ("overlay.orch", overlay)],
             &overrides,
         );
-        // CLI override wins over all file defaults
         assert_eq!(orch.services[0].publish[0].host, 3000);
         assert_eq!(orch.services[0].env.get("APP_PORT").unwrap(), "3000");
     }
@@ -2024,24 +1312,24 @@ SERVICE web
 ARG port=80
 
 SERVICE db
-  FROM postgres:15
+FROM postgres:15
 
 SERVICE web
-  FROM nginx:1.24
-  ENV MODE=prod
-  PUBLISH ${port}:80
-  REQUIRES db
+FROM nginx:1.24
+ENV MODE=prod
+PUBLISH ${port}:80
+REQUIRES db
     "#;
         let staging = r#"
 ARG port=8080
 SERVICE web
-  FROM nginx:1.25
-  ENV MODE=staging
+FROM nginx:1.25
+ENV MODE=staging
     "#;
         let personal = r#"
 SERVICE web
-  ENV DEBUG=true
-  MEMORY 512M
+ENV DEBUG=true
+MEMORY 512M
     "#;
         let orch = parse_files_ok(&[
             ("base.orch", base),
@@ -2059,16 +1347,13 @@ SERVICE web
 
     #[test]
     fn test_multifile__c1_violation_after_merge() {
-        // Base has FROM, overlay adds RUN without clearing FROM properly —
-        // Actually with mode switching, overlay RUN clears FROM. So both won't remain.
-        // This test verifies merge is correct: no C1 error.
         let base = r#"
 SERVICE svc
-  FROM nginx
+FROM nginx
     "#;
         let overlay = r#"
 SERVICE svc
-  RUN /usr/bin/myapp
+RUN /usr/bin/myapp
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].mode, ServiceMode::Host);
@@ -2078,13 +1363,13 @@ SERVICE svc
     fn test_multifile__c4_cycle_across_files() {
         let base = r#"
 SERVICE a
-  FROM nginx
-  REQUIRES b
+FROM nginx
+REQUIRES b
     "#;
         let overlay = r#"
 SERVICE b
-  FROM nginx
-  REQUIRES a
+FROM nginx
+REQUIRES a
     "#;
         let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
         let cycle_err = errors.iter().any(|e| format!("{}", e).contains("cycle"));
@@ -2095,11 +1380,11 @@ SERVICE b
     fn test_multifile__syntax_error_in_overlay() {
         let base = r#"
 SERVICE web
-  FROM nginx
+FROM nginx
     "#;
         let overlay = r#"
 SERVICE web
-  PUBLISH bad_format
+PUBLISH bad_format
     "#;
         let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert!(!errors.is_empty());
@@ -2109,11 +1394,11 @@ SERVICE web
     fn test_multifile__clear_error_on_scalar() {
         let base = r#"
 SERVICE web
-  FROM nginx
+FROM nginx
     "#;
         let overlay = r#"
 SERVICE web
-  CLEAR FROM
+CLEAR FROM
     "#;
         let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
         let has_clear_err = errors
@@ -2130,11 +1415,11 @@ SERVICE web
     fn test_multifile__clear_unknown_directive() {
         let base = r#"
 SERVICE web
-  FROM nginx
+FROM nginx
     "#;
         let overlay = r#"
 SERVICE web
-  CLEAR BANANA
+CLEAR BANANA
     "#;
         let errors = parse_files_err(&[("base.orch", base), ("overlay.orch", overlay)]);
         let has_err = errors
@@ -2146,10 +1431,6 @@ SERVICE web
             errors
         );
     }
-
-    // =========================================================================
-    // ORCH_VERSION directive
-    // =========================================================================
 
     #[test]
     fn test_orch_version__matching_is_accepted() {
@@ -2181,7 +1462,7 @@ SERVICE web
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
         assert!(
             msgs.iter()
-                .any(|m| m.contains("must appear before any SERVICE"))
+                .any(|m| m.contains("must be the first statement"))
         );
     }
 
@@ -2191,7 +1472,10 @@ SERVICE web
         let input = format!("ORCH_VERSION {v}\nORCH_VERSION {v}\nSERVICE db\nFROM img\n");
         let errors = parse_err(&input);
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        assert!(msgs.iter().any(|m| m.contains("duplicate ORCH_VERSION")));
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("must be the first statement"))
+        );
     }
 
     #[test]
@@ -2209,10 +1493,6 @@ SERVICE web
         let orch = parse_ok("SERVICE db\nFROM img\n");
         assert_eq!(orch.version, crate::types::ORCH_VERSION);
     }
-
-    // =========================================================================
-    // PUBLISH optional host address
-    // =========================================================================
 
     #[test]
     fn test_publish__no_address_yields_none() {

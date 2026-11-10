@@ -1,797 +1,367 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::types::{ClearableMap, ClearableVec, RawOrchFile, RawService};
+use crate::error::{OrchError, ValidationError};
+use crate::syntax::{Directive, ListField, mode_keyword};
+use crate::types::{Service, ServiceMode, VolumeMount};
+use crate::value::{Setting, TypedBlock, TypedEntry};
 
-/// Merge multiple raw Orchfile representations left-to-right.
-///
-/// - ARGs: last wins
-/// - Services matched by name across files
-/// - Scalars: last wins (overlay replaces base)
-/// - Keyed lists (ENV, PUBLISH, VOLUME): merge by key, overlay wins on conflict
-/// - Positional lists (REQUIRES, AFTER, ENV_FILE): append with dedup
-/// - CLEAR flags: discard base values before applying overlay
-/// - FROM/RUN special: setting FROM clears RUN + host-only directives, and vice versa
-/// - New services from later files: appended to result
-pub fn merge(files: Vec<RawOrchFile>) -> RawOrchFile {
-    let mut result = RawOrchFile {
-        args: HashMap::new(),
-        services: Vec::new(),
-    };
+#[derive(Clone, Copy)]
+struct Origin {
+    file: usize,
+    line: usize,
+}
 
-    for file in files {
-        // Merge ARGs: last wins
-        for (k, v) in file.args {
-            result.args.insert(k, v);
+struct Draft {
+    service: Service,
+    mode: Option<ServiceMode>,
+    first_block_file: usize,
+    mode_bound_origins: BTreeMap<Directive, Origin>,
+}
+
+pub(crate) fn merged_services(
+    blocks: Vec<TypedBlock>,
+    file_names: &[Option<String>],
+) -> Result<Vec<Service>, Vec<OrchError>> {
+    let mut drafts: Vec<Draft> = Vec::new();
+    let mut draft_index: HashMap<String, usize> = HashMap::new();
+
+    for block in blocks {
+        let index = *draft_index.entry(block.service.clone()).or_insert_with(|| {
+            drafts.push(Draft::new(&block.service, block.file));
+            drafts.len() - 1
+        });
+        drafts[index].apply(block);
+    }
+
+    let mut services = Vec::new();
+    let mut errors: Vec<OrchError> = Vec::new();
+    for draft in drafts {
+        match draft.finish(file_names) {
+            Ok(service) => services.push(service),
+            Err(found) => errors.extend(found.into_iter().map(OrchError::from)),
         }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
 
-        // Merge services by name
-        for overlay_svc in file.services {
-            if let Some(base_svc) = result
-                .services
-                .iter_mut()
-                .find(|s| s.name == overlay_svc.name)
-            {
-                merge_service(base_svc, overlay_svc);
-            } else {
-                // New service — add as-is
-                result.services.push(overlay_svc);
+    let graph_errors: Vec<OrchError> = dependency_cycles(&services)
+        .into_iter()
+        .chain(unknown_requirements(&services))
+        .map(OrchError::from)
+        .collect();
+    if graph_errors.is_empty() {
+        Ok(services)
+    } else {
+        Err(graph_errors)
+    }
+}
+
+impl Draft {
+    fn new(name: &str, first_block_file: usize) -> Self {
+        Draft {
+            service: Service::new(name.to_string(), ServiceMode::Container),
+            mode: None,
+            first_block_file,
+            mode_bound_origins: BTreeMap::new(),
+        }
+    }
+
+    fn apply(&mut self, block: TypedBlock) {
+        if let Some(mode) = block.mode {
+            self.switch_mode(mode);
+        }
+        for entry in &block.entries {
+            if let Setting::Clear(field) = entry.setting {
+                self.clear(field);
             }
         }
-    }
-
-    result
-}
-
-/// Merge an overlay service into a base service (mutates base in place).
-fn merge_service(base: &mut RawService, overlay: RawService) {
-    // Handle mode switching: FROM clears RUN + host-only, RUN clears FROM + container-only
-    if overlay.from.is_some() && base.run.is_some() {
-        // Switching to container mode: clear host-only directives
-        base.run = None;
-        base.run_source = None;
-        base.user = None;
-        base.stop_command = None;
-        base.reload_command = None;
-        base.host_directives_used.clear();
-    }
-    if overlay.run.is_some() && base.from.is_some() {
-        // Switching to host mode: clear container-only directives
-        base.from = None;
-        base.from_source = None;
-        base.entrypoint = None;
-        base.cmd = None;
-        base.publish.values.clear();
-        base.publish.cleared = true;
-        base.volumes.values.clear();
-        base.volumes.cleared = true;
-        base.container_directives_used.clear();
-    }
-
-    // Scalar last-wins: overlay replaces base for each Some field
-    merge_scalar(&mut base.from, &overlay.from);
-    if overlay.from_source.is_some() {
-        base.from_source = overlay.from_source;
-    }
-    merge_scalar(&mut base.run, &overlay.run);
-    if overlay.run_source.is_some() {
-        base.run_source = overlay.run_source;
-    }
-
-    merge_scalar(&mut base.entrypoint, &overlay.entrypoint);
-    merge_scalar(&mut base.cmd, &overlay.cmd);
-    merge_scalar(&mut base.user, &overlay.user);
-    merge_scalar(&mut base.stop_command, &overlay.stop_command);
-    merge_scalar(&mut base.reload_command, &overlay.reload_command);
-    merge_scalar(&mut base.workdir, &overlay.workdir);
-    merge_scalar(&mut base.healthcheck, &overlay.healthcheck);
-    merge_scalar(&mut base.readiness_timeout, &overlay.readiness_timeout);
-    merge_scalar(&mut base.oneshot, &overlay.oneshot);
-    merge_scalar(&mut base.disabled, &overlay.disabled);
-    merge_scalar(&mut base.recreate, &overlay.recreate);
-    merge_scalar(&mut base.restart, &overlay.restart);
-    merge_scalar(&mut base.restart_delay, &overlay.restart_delay);
-    merge_scalar(&mut base.start_limit_burst, &overlay.start_limit_burst);
-    merge_scalar(
-        &mut base.start_limit_interval,
-        &overlay.start_limit_interval,
-    );
-    merge_scalar(&mut base.timeout_start, &overlay.timeout_start);
-    merge_scalar(&mut base.timeout_stop, &overlay.timeout_stop);
-    merge_scalar(&mut base.memory, &overlay.memory);
-    merge_scalar(&mut base.cpus, &overlay.cpus);
-    merge_scalar(&mut base.cpu_quota, &overlay.cpu_quota);
-    merge_scalar(&mut base.limit_nofile, &overlay.limit_nofile);
-    merge_scalar(&mut base.limit_nproc, &overlay.limit_nproc);
-    merge_scalar(&mut base.tasks_max, &overlay.tasks_max);
-    merge_scalar(&mut base.io_weight, &overlay.io_weight);
-    merge_scalar(&mut base.stdout, &overlay.stdout);
-    merge_scalar(&mut base.stderr, &overlay.stderr);
-
-    // Keyed map: ENV (merge by var name)
-    merge_keyed_map(&mut base.env, overlay.env);
-
-    // Keyed list: PUBLISH (merge by container port — third element)
-    merge_keyed_vec(&mut base.publish, overlay.publish, |e| e.2.as_str());
-
-    // Keyed list: VOLUME (merge by destination — second element)
-    merge_keyed_vec(&mut base.volumes, overlay.volumes, |e| e.1.as_str());
-
-    // Positional lists: append + dedup
-    merge_positional(&mut base.requires, overlay.requires);
-    merge_positional(&mut base.after, overlay.after);
-    merge_positional(&mut base.env_files, overlay.env_files);
-
-    // C2/C3 provenance: append overlay's tracking
-    if !overlay.container_directives_used.is_empty() {
-        base.container_directives_used
-            .extend(overlay.container_directives_used);
-    }
-    if !overlay.host_directives_used.is_empty() {
-        base.host_directives_used
-            .extend(overlay.host_directives_used);
-    }
-
-    // Update file_index to the last file that touched this service
-    base.file_index = overlay.file_index;
-}
-
-/// Scalar merge: overlay replaces base if Some.
-fn merge_scalar(base: &mut Option<String>, overlay: &Option<String>) {
-    if overlay.is_some() {
-        *base = overlay.clone();
-    }
-}
-
-/// Keyed map merge (ENV): if cleared, discard base; then merge by key.
-fn merge_keyed_map(base: &mut ClearableMap, overlay: ClearableMap) {
-    if overlay.cleared {
-        base.values.clear();
-    }
-    for (k, v) in overlay.values {
-        base.values.insert(k, v);
-    }
-    // Once cleared, the flag stays (downstream knows base was wiped)
-    if overlay.cleared {
-        base.cleared = true;
-    }
-}
-
-/// Keyed vec merge (PUBLISH, VOLUME): merge by the key produced by `key_of`.
-/// If cleared, discard base values first; otherwise overlay entries replace
-/// base entries with the same key, and new keys are appended.
-fn merge_keyed_vec<T, F>(base: &mut ClearableVec<T>, overlay: ClearableVec<T>, key_of: F)
-where
-    F: Fn(&T) -> &str,
-{
-    if overlay.cleared {
-        base.values.clear();
-    }
-
-    for entry in overlay.values {
-        let key = key_of(&entry).to_string();
-
-        // Find and replace existing entry with same key, or append
-        if let Some(existing) = base.values.iter_mut().find(|e| key_of(e) == key) {
-            *existing = entry;
-        } else {
-            base.values.push(entry);
+        self.drop_republished_ports(&block.entries);
+        for entry in block.entries {
+            self.remember_mode_bound_origin(&entry, block.file);
+            self.set(entry.setting);
         }
     }
 
-    if overlay.cleared {
-        base.cleared = true;
+    fn switch_mode(&mut self, mode: ServiceMode) {
+        let service = &mut self.service;
+        match mode {
+            ServiceMode::Container => {
+                service.user = None;
+                service.stop_command = None;
+                service.reload_command = None;
+            }
+            ServiceMode::Host => {
+                service.entrypoint = None;
+                service.cmd = None;
+                service.publish.clear();
+                service.volumes.clear();
+            }
+        }
+        self.mode_bound_origins
+            .retain(|directive, _| !directive.placement().excludes(mode));
+        self.mode = Some(mode);
     }
-}
 
-/// Positional list merge: if cleared, discard base; then append + dedup.
-fn merge_positional(base: &mut ClearableVec<String>, overlay: ClearableVec<String>) {
-    if overlay.cleared {
-        base.values.clear();
-    }
-
-    for val in overlay.values {
-        if !base.values.contains(&val) {
-            base.values.push(val);
+    fn clear(&mut self, field: ListField) {
+        let service = &mut self.service;
+        match field {
+            ListField::Env => service.env.clear(),
+            ListField::EnvFile => service.env_files.clear(),
+            ListField::Publish => service.publish.clear(),
+            ListField::Volume => service.volumes.clear(),
+            ListField::Requires => service.requires.clear(),
+            ListField::After => service.after.clear(),
         }
     }
 
-    if overlay.cleared {
-        base.cleared = true;
+    fn drop_republished_ports(&mut self, entries: &[TypedEntry]) {
+        let republished: HashSet<u16> = entries
+            .iter()
+            .filter_map(|entry| match &entry.setting {
+                Setting::Publish(mapping) => Some(mapping.container),
+                _ => None,
+            })
+            .collect();
+        self.service
+            .publish
+            .retain(|mapping| !republished.contains(&mapping.container));
     }
-}
 
-#[cfg(test)]
-#[allow(non_snake_case)]
-mod tests {
-    use crate::merge::merge;
-    use crate::types::{RawOrchFile, RawService, Source};
+    fn remember_mode_bound_origin(&mut self, entry: &TypedEntry, file: usize) {
+        let is_mode_bound = [ServiceMode::Container, ServiceMode::Host]
+            .into_iter()
+            .any(|mode| entry.directive.placement().excludes(mode));
+        if is_mode_bound {
+            self.mode_bound_origins.insert(
+                entry.directive,
+                Origin {
+                    file,
+                    line: entry.line,
+                },
+            );
+        }
+    }
 
-    // ---------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------
-
-    fn raw_file(args: Vec<(&str, &str)>, services: Vec<RawService>) -> RawOrchFile {
-        RawOrchFile {
-            args: args
+    fn set(&mut self, setting: Setting) {
+        let service = &mut self.service;
+        match setting {
+            Setting::Image(image) => {
+                service.image = Some(image);
+                service.run_command = None;
+            }
+            Setting::RunCommand(command) => {
+                service.run_command = Some(command);
+                service.image = None;
+            }
+            Setting::Entrypoint(entrypoint) => service.entrypoint = Some(entrypoint),
+            Setting::Cmd(cmd) => service.cmd = Some(cmd),
+            Setting::Publish(mapping) => service.publish.push(mapping),
+            Setting::Volume(volume) => mount(&mut service.volumes, volume),
+            Setting::User(user) => service.user = Some(user),
+            Setting::StopCommand(command) => service.stop_command = Some(command),
+            Setting::ReloadCommand(command) => service.reload_command = Some(command),
+            Setting::Workdir(workdir) => service.workdir = Some(workdir),
+            Setting::Env { key, value } => {
+                service.env.insert(key, value);
+            }
+            Setting::EnvFile(path) => push_unique(&mut service.env_files, path),
+            Setting::Requires(names) => names
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            services,
+                .for_each(|name| push_unique(&mut service.requires, name)),
+            Setting::After(names) => names
+                .into_iter()
+                .for_each(|name| push_unique(&mut service.after, name)),
+            Setting::Healthcheck(check) => service.healthcheck = Some(check),
+            Setting::ReadinessTimeout(timeout) => service.readiness_timeout = Some(timeout),
+            Setting::Oneshot(oneshot) => service.oneshot = oneshot,
+            Setting::Disabled(disabled) => service.disabled = disabled,
+            Setting::Recreate(policy) => service.recreate = policy,
+            Setting::Restart(policy) => service.restart.policy = policy,
+            Setting::RestartDelay(delay) => service.restart.delay = Some(delay),
+            Setting::StartLimitBurst(burst) => service.restart.start_limit_burst = Some(burst),
+            Setting::StartLimitInterval(interval) => {
+                service.restart.start_limit_interval = Some(interval)
+            }
+            Setting::TimeoutStart(timeout) => service.timeouts.start = Some(timeout),
+            Setting::TimeoutStop(timeout) => service.timeouts.stop = Some(timeout),
+            Setting::Memory(memory) => service.resources.memory = Some(memory),
+            Setting::Cpus(cpus) => service.resources.cpus = Some(cpus),
+            Setting::CpuQuota(quota) => service.resources.cpu_quota = Some(quota),
+            Setting::LimitNofile(limit) => service.resources.limit_nofile = Some(limit),
+            Setting::LimitNproc(limit) => service.resources.limit_nproc = Some(limit),
+            Setting::TasksMax(max) => service.resources.tasks_max = Some(max),
+            Setting::IoWeight(weight) => service.resources.io_weight = Some(weight),
+            Setting::Stdout(path) => service.logging.stdout = Some(path),
+            Setting::Stderr(path) => service.logging.stderr = Some(path),
+            Setting::Clear(_) => {}
         }
     }
 
-    fn raw_svc(name: &str, file_index: usize) -> RawService {
-        RawService::new(name.to_string(), file_index)
+    fn finish(mut self, file_names: &[Option<String>]) -> Result<Service, Vec<ValidationError>> {
+        let name = self.service.name.clone();
+        let Some(mode) = self.mode else {
+            let error = ValidationError::new(
+                &name,
+                "no block sets FROM or RUN, so the service has no mode (C1)",
+            );
+            return Err(vec![with_file(error, file_names, self.first_block_file)]);
+        };
+
+        let misplaced: Vec<ValidationError> = self
+            .mode_bound_origins
+            .iter()
+            .filter(|(directive, _)| directive.placement().excludes(mode))
+            .map(|(directive, origin)| {
+                let constraint = match mode {
+                    ServiceMode::Host => "C2",
+                    ServiceMode::Container => "C3",
+                };
+                ValidationError::new(
+                    &name,
+                    format!(
+                        "{} at {} is {}, but the merged service sets {} ({constraint})",
+                        directive.keyword(),
+                        location(file_names, *origin),
+                        directive.placement().describe(),
+                        mode_keyword(mode),
+                    ),
+                )
+            })
+            .collect();
+        if !misplaced.is_empty() {
+            return Err(misplaced);
+        }
+
+        self.service.mode = mode;
+        Ok(self.service)
+    }
+}
+
+fn mount(volumes: &mut Vec<VolumeMount>, volume: VolumeMount) {
+    match volumes
+        .iter_mut()
+        .find(|mounted| mounted.destination == volume.destination)
+    {
+        Some(mounted) => *mounted = volume,
+        None => volumes.push(volume),
+    }
+}
+
+fn push_unique(list: &mut Vec<String>, item: String) {
+    if !list.contains(&item) {
+        list.push(item);
+    }
+}
+
+fn with_file(
+    error: ValidationError,
+    file_names: &[Option<String>],
+    file: usize,
+) -> ValidationError {
+    match file_names.get(file).and_then(Option::as_deref) {
+        Some(name) => error.with_file(name),
+        None => error,
+    }
+}
+
+fn location(file_names: &[Option<String>], origin: Origin) -> String {
+    match file_names.get(origin.file).and_then(Option::as_deref) {
+        Some(name) => format!("{name}:{}", origin.line),
+        None => format!("line {}", origin.line),
+    }
+}
+
+fn unknown_requirements(services: &[Service]) -> Vec<ValidationError> {
+    let known: HashSet<&str> = services.iter().map(|s| s.name.as_str()).collect();
+    services
+        .iter()
+        .flat_map(|service| {
+            service
+                .requires
+                .iter()
+                .filter(|required| !known.contains(required.as_str()))
+                .map(|required| {
+                    ValidationError::new(
+                        &service.name,
+                        format!("REQUIRES references unknown service '{required}'"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Visit {
+    Unvisited,
+    InProgress,
+    Done,
+}
+
+struct CycleSearch<'a> {
+    dependencies: HashMap<&'a str, Vec<&'a str>>,
+    visits: HashMap<&'a str, Visit>,
+    path: Vec<&'a str>,
+    cycles: Vec<ValidationError>,
+}
+
+fn dependency_cycles(services: &[Service]) -> Vec<ValidationError> {
+    let known: HashSet<&str> = services.iter().map(|s| s.name.as_str()).collect();
+    let dependencies = services
+        .iter()
+        .map(|service| {
+            let targets = service
+                .requires
+                .iter()
+                .chain(&service.after)
+                .map(String::as_str)
+                .filter(|target| known.contains(target))
+                .collect();
+            (service.name.as_str(), targets)
+        })
+        .collect();
+    let mut search = CycleSearch {
+        dependencies,
+        visits: known.iter().map(|&name| (name, Visit::Unvisited)).collect(),
+        path: Vec::new(),
+        cycles: Vec::new(),
+    };
+    for service in services {
+        if search.visits[service.name.as_str()] == Visit::Unvisited {
+            search.visit(&service.name);
+        }
+    }
+    search.cycles
+}
+
+impl<'a> CycleSearch<'a> {
+    fn visit(&mut self, node: &'a str) {
+        self.visits.insert(node, Visit::InProgress);
+        self.path.push(node);
+
+        for target in self.dependencies.get(node).cloned().unwrap_or_default() {
+            match self.visits[target] {
+                Visit::InProgress => self.report_cycle_closing_at(target),
+                Visit::Unvisited => self.visit(target),
+                Visit::Done => {}
+            }
+        }
+
+        self.path.pop();
+        self.visits.insert(node, Visit::Done);
     }
 
-    fn svc_with_from(name: &str, image: &str, file_index: usize) -> RawService {
-        let mut s = raw_svc(name, file_index);
-        s.from = Some(image.to_string());
-        s.from_source = Some(Source::new(2, file_index));
-        s
-    }
-
-    fn svc_with_run(name: &str, cmd: &str, file_index: usize) -> RawService {
-        let mut s = raw_svc(name, file_index);
-        s.run = Some(cmd.to_string());
-        s.run_source = Some(Source::new(2, file_index));
-        s
-    }
-
-    // ---------------------------------------------------------------------------
-    // ARG merge
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__args_last_wins() {
-        let f1 = raw_file(vec![("port", "8080"), ("host", "localhost")], vec![]);
-        let f2 = raw_file(vec![("port", "9090")], vec![]);
-        let result = merge(vec![f1, f2]);
-
-        assert_eq!(result.args.get("port").unwrap(), "9090");
-        assert_eq!(result.args.get("host").unwrap(), "localhost");
-    }
-
-    #[test]
-    fn test_merge__args_three_files() {
-        let f1 = raw_file(vec![("x", "1")], vec![]);
-        let f2 = raw_file(vec![("x", "2"), ("y", "10")], vec![]);
-        let f3 = raw_file(vec![("x", "3")], vec![]);
-        let result = merge(vec![f1, f2, f3]);
-
-        assert_eq!(result.args.get("x").unwrap(), "3");
-        assert_eq!(result.args.get("y").unwrap(), "10");
-    }
-
-    // ---------------------------------------------------------------------------
-    // Scalar last-wins
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__scalar_from_last_wins() {
-        let s1 = svc_with_from("db", "postgres:15", 0);
-        let mut s2 = raw_svc("db", 1);
-        s2.from = Some("postgres:16".to_string());
-        s2.from_source = Some(Source::new(2, 1));
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-
-        assert_eq!(result.services.len(), 1);
-        assert_eq!(result.services[0].from.as_deref(), Some("postgres:16"));
-    }
-
-    #[test]
-    fn test_merge__scalar_overlay_none_does_not_clear() {
-        let mut s1 = svc_with_from("web", "nginx:latest", 0);
-        s1.workdir = Some("/app".to_string());
-
-        // Overlay sets FROM but not workdir
-        let mut s2 = raw_svc("web", 1);
-        s2.from = Some("nginx:alpine".to_string());
-        s2.from_source = Some(Source::new(2, 1));
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-
-        assert_eq!(result.services[0].from.as_deref(), Some("nginx:alpine"));
-        assert_eq!(result.services[0].workdir.as_deref(), Some("/app"));
-    }
-
-    #[test]
-    fn test_merge__all_scalars_overlay() {
-        let mut s1 = svc_with_from("web", "nginx:latest", 0);
-        s1.entrypoint = Some("/old-entry".to_string());
-        s1.cmd = Some("old-cmd".to_string());
-        s1.workdir = Some("/old".to_string());
-        s1.healthcheck = Some("curl old".to_string());
-        s1.readiness_timeout = Some("10".to_string());
-        s1.oneshot = Some("false".to_string());
-        s1.disabled = Some("false".to_string());
-        s1.recreate = Some("never".to_string());
-        s1.restart = Some("no".to_string());
-        s1.restart_delay = Some("1s".to_string());
-        s1.start_limit_burst = Some("3".to_string());
-        s1.start_limit_interval = Some("60s".to_string());
-        s1.timeout_start = Some("10s".to_string());
-        s1.timeout_stop = Some("10s".to_string());
-        s1.memory = Some("1G".to_string());
-        s1.cpus = Some("1.0".to_string());
-        s1.cpu_quota = Some("50%".to_string());
-        s1.limit_nofile = Some("1024".to_string());
-        s1.limit_nproc = Some("512".to_string());
-        s1.tasks_max = Some("100".to_string());
-        s1.io_weight = Some("50".to_string());
-        s1.stdout = Some("/old.log".to_string());
-        s1.stderr = Some("/old.err".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.memory = Some("4G".to_string());
-        s2.cpus = Some("2.0".to_string());
-        s2.stdout = Some("/new.log".to_string());
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let svc = &result.services[0];
-
-        // Overridden
-        assert_eq!(svc.memory.as_deref(), Some("4G"));
-        assert_eq!(svc.cpus.as_deref(), Some("2.0"));
-        assert_eq!(svc.stdout.as_deref(), Some("/new.log"));
-        // Preserved from base
-        assert_eq!(svc.entrypoint.as_deref(), Some("/old-entry"));
-        assert_eq!(svc.healthcheck.as_deref(), Some("curl old"));
-        assert_eq!(svc.stderr.as_deref(), Some("/old.err"));
-        assert_eq!(svc.limit_nofile.as_deref(), Some("1024"));
-    }
-
-    // ---------------------------------------------------------------------------
-    // Keyed map merge: ENV
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__env_merge_by_key() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.env.values.insert("A".to_string(), "1".to_string());
-        s1.env.values.insert("B".to_string(), "2".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.env
-            .values
-            .insert("B".to_string(), "override".to_string());
-        s2.env.values.insert("C".to_string(), "3".to_string());
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let env = &result.services[0].env.values;
-
-        assert_eq!(env.get("A").unwrap(), "1");
-        assert_eq!(env.get("B").unwrap(), "override");
-        assert_eq!(env.get("C").unwrap(), "3");
-    }
-
-    #[test]
-    fn test_merge__env_clear_then_set() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.env.values.insert("OLD".to_string(), "val".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.env.cleared = true;
-        s2.env.values.insert("NEW".to_string(), "fresh".to_string());
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let env = &result.services[0].env.values;
-
-        assert!(!env.contains_key("OLD"));
-        assert_eq!(env.get("NEW").unwrap(), "fresh");
-        assert!(result.services[0].env.cleared);
-    }
-
-    #[test]
-    fn test_merge__env_clear_only() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.env.values.insert("OLD".to_string(), "val".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.env.cleared = true;
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        assert!(result.services[0].env.values.is_empty());
-    }
-
-    // ---------------------------------------------------------------------------
-    // Keyed vec merge: PUBLISH (keyed by container port)
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__publish_merge_by_container_port() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.publish
-            .values
-            .push(("".to_string(), "8080".to_string(), "80".to_string()));
-        s1.publish
-            .values
-            .push(("".to_string(), "8443".to_string(), "443".to_string()));
-
-        let mut s2 = raw_svc("web", 1);
-        s2.publish
-            .values
-            .push(("".to_string(), "9090".to_string(), "80".to_string())); // override port 80
-        s2.publish
-            .values
-            .push(("".to_string(), "3000".to_string(), "3000".to_string())); // new
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let pubs = &result.services[0].publish.values;
-
-        assert_eq!(pubs.len(), 3);
-        // Port 80: overridden host from 8080 to 9090
-        let p80 = pubs.iter().find(|(_, _, c)| c == "80").unwrap();
-        assert_eq!(p80.1, "9090");
-        // Port 443: unchanged
-        let p443 = pubs.iter().find(|(_, _, c)| c == "443").unwrap();
-        assert_eq!(p443.1, "8443");
-        // Port 3000: new
-        let p3000 = pubs.iter().find(|(_, _, c)| c == "3000").unwrap();
-        assert_eq!(p3000.1, "3000");
-    }
-
-    #[test]
-    fn test_merge__publish_clear_then_add() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.publish
-            .values
-            .push(("".to_string(), "8080".to_string(), "80".to_string()));
-
-        let mut s2 = raw_svc("web", 1);
-        s2.publish.cleared = true;
-        s2.publish
-            .values
-            .push(("".to_string(), "9090".to_string(), "80".to_string()));
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let pubs = &result.services[0].publish.values;
-
-        assert_eq!(pubs.len(), 1);
-        assert_eq!(pubs[0].1, "9090");
-        assert_eq!(pubs[0].2, "80");
-    }
-
-    // ---------------------------------------------------------------------------
-    // Keyed vec merge: VOLUME (keyed by destination)
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__volume_merge_by_dest() {
-        let mut s1 = svc_with_from("db", "postgres", 0);
-        s1.volumes
-            .values
-            .push(("pgdata".to_string(), "/var/lib/postgresql/data".to_string()));
-        s1.volumes
-            .values
-            .push(("./config".to_string(), "/etc/postgres".to_string()));
-
-        let mut s2 = raw_svc("db", 1);
-        // Override source for same dest
-        s2.volumes
-            .values
-            .push(("./local-config".to_string(), "/etc/postgres".to_string()));
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let vols = &result.services[0].volumes.values;
-
-        assert_eq!(vols.len(), 2);
-        let etc = vols.iter().find(|(_, d)| d == "/etc/postgres").unwrap();
-        assert_eq!(etc.0, "./local-config");
-    }
-
-    // ---------------------------------------------------------------------------
-    // Positional list merge: REQUIRES, AFTER, ENV_FILE
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__requires_append_dedup() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.requires.values.push("db".to_string());
-        s1.requires.values.push("redis".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.requires.values.push("redis".to_string()); // duplicate — should be deduped
-        s2.requires.values.push("cache".to_string());
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let reqs = &result.services[0].requires.values;
-
-        assert_eq!(reqs, &["db", "redis", "cache"]);
-    }
-
-    #[test]
-    fn test_merge__after_append_dedup() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.after.values.push("db".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.after.values.push("db".to_string());
-        s2.after.values.push("redis".to_string());
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        assert_eq!(result.services[0].after.values, &["db", "redis"]);
-    }
-
-    #[test]
-    fn test_merge__env_file_append_dedup() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.env_files.values.push(".env".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.env_files.values.push(".env".to_string());
-        s2.env_files.values.push(".env.local".to_string());
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        assert_eq!(result.services[0].env_files.values, &[".env", ".env.local"]);
-    }
-
-    #[test]
-    fn test_merge__requires_clear_then_add() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.requires.values.push("db".to_string());
-        s1.requires.values.push("redis".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.requires.cleared = true;
-        s2.requires.values.push("cache".to_string());
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        assert_eq!(result.services[0].requires.values, &["cache"]);
-    }
-
-    // ---------------------------------------------------------------------------
-    // Mode switching: FROM ↔ RUN
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__switch_to_host_clears_container_directives() {
-        let mut s1 = svc_with_from("svc", "nginx:latest", 0);
-        s1.entrypoint = Some("/docker-entrypoint.sh".to_string());
-        s1.cmd = Some("nginx -g 'daemon off;'".to_string());
-        s1.publish
-            .values
-            .push(("".to_string(), "8080".to_string(), "80".to_string()));
-        s1.volumes
-            .values
-            .push(("./html".to_string(), "/usr/share/nginx/html".to_string()));
-        s1.container_directives_used
-            .push(("ENTRYPOINT".to_string(), 3, 0));
-        s1.container_directives_used.push(("CMD".to_string(), 4, 0));
-        s1.container_directives_used
-            .push(("PUBLISH".to_string(), 5, 0));
-        s1.container_directives_used
-            .push(("VOLUME".to_string(), 6, 0));
-
-        let s2 = svc_with_run("svc", "/usr/local/bin/myapp", 1);
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let svc = &result.services[0];
-
-        // FROM cleared, RUN set
-        assert!(svc.from.is_none());
-        assert_eq!(svc.run.as_deref(), Some("/usr/local/bin/myapp"));
-        // Container-only directives cleared
-        assert!(svc.entrypoint.is_none());
-        assert!(svc.cmd.is_none());
-        assert!(svc.publish.values.is_empty());
-        assert!(svc.volumes.values.is_empty());
-        assert!(svc.container_directives_used.is_empty());
-    }
-
-    #[test]
-    fn test_merge__switch_to_container_clears_host_directives() {
-        let mut s1 = svc_with_run("svc", "/usr/local/bin/myapp", 0);
-        s1.user = Some("nobody".to_string());
-        s1.stop_command = Some("kill $MAINPID".to_string());
-        s1.reload_command = Some("kill -HUP $MAINPID".to_string());
-        s1.host_directives_used.push(("USER".to_string(), 3, 0));
-        s1.host_directives_used.push(("STOP".to_string(), 4, 0));
-        s1.host_directives_used.push(("RELOAD".to_string(), 5, 0));
-
-        let s2 = svc_with_from("svc", "myapp:latest", 1);
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let svc = &result.services[0];
-
-        // RUN cleared, FROM set
-        assert!(svc.run.is_none());
-        assert_eq!(svc.from.as_deref(), Some("myapp:latest"));
-        // Host-only directives cleared
-        assert!(svc.user.is_none());
-        assert!(svc.stop_command.is_none());
-        assert!(svc.reload_command.is_none());
-        assert!(svc.host_directives_used.is_empty());
-    }
-
-    // ---------------------------------------------------------------------------
-    // New services from overlay
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__new_service_from_overlay() {
-        let s1 = svc_with_from("web", "nginx", 0);
-        let s2 = svc_with_from("cache", "redis:7", 1);
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-
-        assert_eq!(result.services.len(), 2);
-        assert_eq!(result.services[0].name, "web");
-        assert_eq!(result.services[1].name, "cache");
-    }
-
-    #[test]
-    fn test_merge__overlay_adds_and_overrides() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.env.values.insert("PORT".to_string(), "80".to_string());
-        let s1b = svc_with_from("db", "postgres:15", 0);
-
-        let mut s2_web = raw_svc("web", 1);
-        s2_web
-            .env
-            .values
-            .insert("PORT".to_string(), "8080".to_string());
-        let s2_cache = svc_with_from("cache", "redis:7", 1);
-
-        let result = merge(vec![
-            raw_file(vec![], vec![s1, s1b]),
-            raw_file(vec![], vec![s2_web, s2_cache]),
-        ]);
-
-        assert_eq!(result.services.len(), 3);
-        assert_eq!(result.services[0].env.values.get("PORT").unwrap(), "8080");
-        assert_eq!(result.services[1].name, "db");
-        assert_eq!(result.services[2].name, "cache");
-    }
-
-    // ---------------------------------------------------------------------------
-    // Single file pass-through
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__single_file_identity() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.env.values.insert("A".to_string(), "1".to_string());
-        s1.requires.values.push("db".to_string());
-
-        let result = merge(vec![raw_file(vec![("port", "8080")], vec![s1])]);
-
-        assert_eq!(result.args.get("port").unwrap(), "8080");
-        assert_eq!(result.services.len(), 1);
-        assert_eq!(result.services[0].from.as_deref(), Some("nginx"));
-        assert_eq!(result.services[0].env.values.get("A").unwrap(), "1");
-        assert_eq!(result.services[0].requires.values, &["db"]);
-    }
-
-    // ---------------------------------------------------------------------------
-    // Three-file merge
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__three_file_cascade() {
-        let mut s1 = svc_with_from("web", "nginx:1.24", 0);
-        s1.env.values.insert("MODE".to_string(), "prod".to_string());
-        s1.publish
-            .values
-            .push(("".to_string(), "80".to_string(), "80".to_string()));
-        s1.requires.values.push("db".to_string());
-
-        let mut s2 = raw_svc("web", 1);
-        s2.from = Some("nginx:1.25".to_string());
-        s2.from_source = Some(Source::new(2, 1));
-        s2.env
-            .values
-            .insert("MODE".to_string(), "staging".to_string());
-        s2.publish
-            .values
-            .push(("".to_string(), "8080".to_string(), "80".to_string())); // override host for port 80
-
-        let mut s3 = raw_svc("web", 2);
-        s3.env
-            .values
-            .insert("DEBUG".to_string(), "true".to_string());
-        s3.requires.values.push("cache".to_string());
-
-        let result = merge(vec![
-            raw_file(vec![], vec![s1]),
-            raw_file(vec![], vec![s2]),
-            raw_file(vec![], vec![s3]),
-        ]);
-
-        let svc = &result.services[0];
-        assert_eq!(svc.from.as_deref(), Some("nginx:1.25"));
-        assert_eq!(svc.env.values.get("MODE").unwrap(), "staging");
-        assert_eq!(svc.env.values.get("DEBUG").unwrap(), "true");
-        // Port 80 host overridden to 8080
-        assert_eq!(svc.publish.values.len(), 1);
-        assert_eq!(svc.publish.values[0].1, "8080");
-        assert_eq!(svc.publish.values[0].2, "80");
-        // Requires: db + cache (deduped)
-        assert_eq!(svc.requires.values, &["db", "cache"]);
-    }
-
-    // ---------------------------------------------------------------------------
-    // Empty overlay
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__empty_overlay() {
-        let s1 = svc_with_from("web", "nginx", 0);
-        let result = merge(vec![
-            raw_file(vec![("p", "1")], vec![s1]),
-            raw_file(vec![], vec![]),
-        ]);
-
-        assert_eq!(result.args.get("p").unwrap(), "1");
-        assert_eq!(result.services.len(), 1);
-        assert_eq!(result.services[0].from.as_deref(), Some("nginx"));
-    }
-
-    #[test]
-    fn test_merge__empty_base() {
-        let s1 = svc_with_from("web", "nginx", 1);
-        let result = merge(vec![raw_file(vec![], vec![]), raw_file(vec![], vec![s1])]);
-
-        assert_eq!(result.services.len(), 1);
-        assert_eq!(result.services[0].from.as_deref(), Some("nginx"));
-    }
-
-    // ---------------------------------------------------------------------------
-    // file_index tracking
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__file_index_updated_to_last_file() {
-        let s1 = svc_with_from("web", "nginx", 0);
-        let s2 = raw_svc("web", 1);
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        assert_eq!(result.services[0].file_index, 1);
-    }
-
-    // ---------------------------------------------------------------------------
-    // C2/C3 directive tracking
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__container_directives_extend() {
-        let mut s1 = svc_with_from("web", "nginx", 0);
-        s1.container_directives_used
-            .push(("ENTRYPOINT".to_string(), 3, 0));
-
-        let mut s2 = raw_svc("web", 1);
-        s2.container_directives_used.push(("CMD".to_string(), 2, 1));
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        assert_eq!(result.services[0].container_directives_used.len(), 2);
-    }
-
-    // ---------------------------------------------------------------------------
-    // CLEAR on volumes
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn test_merge__volume_clear_then_add() {
-        let mut s1 = svc_with_from("db", "postgres", 0);
-        s1.volumes
-            .values
-            .push(("pgdata".to_string(), "/data".to_string()));
-        s1.volumes
-            .values
-            .push(("./conf".to_string(), "/etc".to_string()));
-
-        let mut s2 = raw_svc("db", 1);
-        s2.volumes.cleared = true;
-        s2.volumes
-            .values
-            .push(("tmpdata".to_string(), "/data".to_string()));
-
-        let result = merge(vec![raw_file(vec![], vec![s1]), raw_file(vec![], vec![s2])]);
-        let vols = &result.services[0].volumes.values;
-
-        assert_eq!(vols.len(), 1);
-        assert_eq!(vols[0].0, "tmpdata");
-        assert_eq!(vols[0].1, "/data");
+    fn report_cycle_closing_at(&mut self, target: &'a str) {
+        let start = self
+            .path
+            .iter()
+            .position(|&node| node == target)
+            .unwrap_or(0);
+        let cycle = self.path[start..].join(" -> ");
+        self.cycles.push(ValidationError::new(
+            target,
+            format!("dependency cycle detected: {cycle} -> {target}"),
+        ));
     }
 }
