@@ -1,0 +1,3 @@
+SERVICE web
+FROM nginx
+ENV OLD=1

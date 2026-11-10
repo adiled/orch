@@ -1,0 +1,7 @@
+# top
+
+   
+  # indented comment
+SERVICE app
+# inside a block
+RUN x

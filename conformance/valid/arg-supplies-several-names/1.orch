@@ -1,0 +1,8 @@
+ARG deps=db cache
+SERVICE db
+RUN x
+SERVICE cache
+RUN x
+SERVICE app
+RUN x
+REQUIRES ${deps}

@@ -1,0 +1,3 @@
+SERVICE app
+RUN x
+ENV A=red[31m

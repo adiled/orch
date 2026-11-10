@@ -1,0 +1,3 @@
+SERVICE web
+FROM nginx
+PUBLISH ${port}:80

@@ -1,0 +1,4 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE app
+RUN echo hi

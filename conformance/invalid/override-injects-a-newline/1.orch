@@ -1,0 +1,3 @@
+ARG a=1
+SERVICE app
+RUN echo ${a}

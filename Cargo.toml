@@ -12,6 +12,7 @@ include = [
     "LICENSE",
     "README.md",
     "schema/*.json",
+    "conformance/**",
 ]
 
 [[bin]]

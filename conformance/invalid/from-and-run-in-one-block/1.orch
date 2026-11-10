@@ -1,0 +1,3 @@
+SERVICE app
+FROM img
+RUN x

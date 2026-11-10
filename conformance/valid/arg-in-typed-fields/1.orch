@@ -1,0 +1,6 @@
+ARG port=8080
+ARG mem=2G
+SERVICE web
+FROM nginx
+PUBLISH ${port}:80
+MEMORY ${mem}

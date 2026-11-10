@@ -1,0 +1,5 @@
+SERVICE app
+RUN x
+ENV B=2
+ENV A=1
+ENV _C=3

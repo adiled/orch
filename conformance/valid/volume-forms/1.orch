@@ -1,0 +1,6 @@
+SERVICE db
+FROM postgres
+VOLUME pgdata:/var/lib/data
+VOLUME /host/conf:/etc/conf:ro
+VOLUME ~/cache:/cache:rw
+VOLUME logs.v1:/logs/

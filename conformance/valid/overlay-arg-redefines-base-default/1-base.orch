@@ -1,0 +1,4 @@
+ARG port=8080
+SERVICE web
+FROM nginx
+PUBLISH ${port}:80

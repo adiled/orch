@@ -1,0 +1,4 @@
+ARG b=x
+ARG a=${b}
+SERVICE app
+RUN x

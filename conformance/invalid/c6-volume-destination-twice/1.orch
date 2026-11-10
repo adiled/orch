@@ -1,0 +1,4 @@
+SERVICE db
+FROM pg
+VOLUME a:/data
+VOLUME b:/data/

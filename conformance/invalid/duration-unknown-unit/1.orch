@@ -1,0 +1,3 @@
+SERVICE app
+RUN x
+TIMEOUT_START 1h

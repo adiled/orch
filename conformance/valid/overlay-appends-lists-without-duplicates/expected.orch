@@ -1,0 +1,13 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE db
+RUN x
+
+SERVICE cache
+RUN x
+
+SERVICE web
+RUN x
+ENV_FILE /a.env
+ENV_FILE /b.env
+REQUIRES db cache

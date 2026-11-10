@@ -1,0 +1,3 @@
+MEMORY 1G
+SERVICE app
+RUN x

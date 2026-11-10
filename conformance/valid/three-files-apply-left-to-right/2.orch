@@ -1,0 +1,3 @@
+SERVICE web
+FROM nginx:2
+MEMORY 2G

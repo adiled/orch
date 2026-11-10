@@ -1,0 +1,5 @@
+SERVICE a
+RUN x
+REQUIRES b
+SERVICE b
+RUN x

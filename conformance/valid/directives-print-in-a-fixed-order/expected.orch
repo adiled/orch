@@ -1,0 +1,9 @@
+ORCH_VERSION 1.0.0-rc
+
+SERVICE app
+RUN x
+USER www-data
+WORKDIR /w
+ENV A=1
+MEMORY 1G
+STDERR /e

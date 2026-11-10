@@ -1,0 +1,3 @@
+ARG tag=15
+SERVICE db
+FROM postgres:${tag}

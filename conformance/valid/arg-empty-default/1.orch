@@ -1,0 +1,3 @@
+ARG suffix=
+SERVICE app
+RUN run${suffix}

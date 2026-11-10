@@ -1,0 +1,3 @@
+SERVICE app
+FROM img
+PUBLISH 8080:80
