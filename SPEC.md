@@ -105,7 +105,7 @@ ARG memory=4G
 2. Environment: `ORCH_ARG_name=value`
 3. Orchfile default
 
-An override applies only to an ARG that one of the files declares. An override for an undeclared name is ignored.
+An override applies only to an ARG declared in one of the Orchfiles being resolved. An override for an undeclared name is ignored.
 
 **Variable expansion**: `${name}` in any directive value is replaced with that ARG's value.
 
