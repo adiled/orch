@@ -101,7 +101,7 @@ orchfile    ::= bom? line ( newline line )*   /* the final line ending is option
 line        ::= blank | comment | statement ws?
 blank       ::= ws*
 comment     ::= ws* '#' any*
-bom         ::= #xFEFF   /* optional UTF-8 byte-order mark; ignored */
+bom         ::= #xFEFF   /* UTF-8 byte-order mark */
 statement   ::= version | arg | service_decl | directive
 \end{lstlisting}
 
@@ -118,8 +118,8 @@ arg         ::= 'ARG' ws identifier '=' value
 \subsection{Service Blocks}
 
 \begin{lstlisting}
-/* Service blocks. A block sets at most one mode. A block with neither FROM
-   nor RUN is an overlay block and takes its mode from another file (C1). */
+/* Service blocks. A block sets at most one of FROM and RUN. A block with
+   neither is an overlay block. */
 service_block  ::= service_decl ( container_body | host_body | overlay_body )
 service_decl   ::= 'SERVICE' ws service_name
 container_body ::= container_item* from_directive container_item*
@@ -145,7 +145,7 @@ directive   ::= from_directive
 \subsubsection{Overlay Composition}
 
 \begin{lstlisting}
-/* Overlay composition - resets a list-type directive before merge */
+/* Overlay composition */
 clear_directive
             ::= 'CLEAR' ws clearable_target
 
@@ -260,7 +260,7 @@ user_name   ::= ( alpha | digit | '_' ) ( alpha | digit | '_' | '-' | '.' )*
 volume_source      ::= volume_part   /* host path or named volume */
 volume_destination ::= volume_part   /* container path */
 volume_part ::= ( visible - ':' ) ( ( any - ':' )* ( visible - ':' ) )?
-volume_mode ::= 'ro' | 'rw'          /* rw if omitted */
+volume_mode ::= 'ro' | 'rw'
 
 /* Free text. It never starts or ends with whitespace. */
 text        ::= visible ( any* visible )?
@@ -270,8 +270,8 @@ path        ::= text
 value       ::= ( any* visible )?   /* after '='; may be empty */
 url         ::= ( 'http://' | 'https://' ) text
 
-/* var_ref and var_escape may appear anywhere in the value of a directive inside a SERVICE block. Each value must match its rule after expansion (see SPEC.md). */
-var_ref     ::= '${' identifier '}'   /* identifier MUST be a declared ARG */
+/* var_ref and var_escape may appear anywhere in the value of a directive inside a service block. Each value must match its rule after expansion. */
+var_ref     ::= '${' identifier '}'
 var_escape  ::= '$${'                 /* a literal '${'; never starts a var_ref */
 
 bool        ::= 'true' | 'false'
