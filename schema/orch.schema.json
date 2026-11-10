@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/adiled/orch/schema/orch.schema.json",
+  "title": "orch resolve --json",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "version": {
+      "type": "string"
+    },
+    "args": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "container",
+              "host"
+            ]
+          },
+          "image": {
+            "type": "string"
+          },
+          "run_command": {
+            "type": "string"
+          },
+          "entrypoint": {
+            "type": "string"
+          },
+          "cmd": {
+            "type": "string"
+          },
+          "publish": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "host": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "container": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              },
+              "required": [
+                "host",
+                "container"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string"
+                },
+                "destination": {
+                  "type": "string"
+                },
+                "is_named": {
+                  "type": "boolean"
+                },
+                "read_only": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "source",
+                "destination",
+                "is_named",
+                "read_only"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "user": {
+            "type": "string"
+          },
+          "stop_command": {
+            "type": "string"
+          },
+          "reload_command": {
+            "type": "string"
+          },
+          "workdir": {
+            "type": "string"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "env_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "after": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "healthcheck": {
+            "type": "string"
+          },
+          "readiness_timeout": {
+            "type": "string"
+          },
+          "oneshot": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "recreate": {
+            "enum": [
+              "always",
+              "never"
+            ]
+          },
+          "restart": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "enum": [
+                  "no",
+                  "always",
+                  "on_failure"
+                ]
+              },
+              "delay": {
+                "type": "string"
+              },
+              "start_limit_burst": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "start_limit_interval": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "policy"
+            ],
+            "additionalProperties": false
+          },
+          "timeouts": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string"
+              },
+              "stop": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "resources": {
+            "type": "object",
+            "properties": {
+              "memory": {
+                "type": "string"
+              },
+              "cpus": {
+                "type": "number",
+                "minimum": 0
+              },
+              "cpu_quota": {
+                "type": "string"
+              },
+              "limit_nofile": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "limit_nproc": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tasks_max": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "io_weight": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "logging": {
+            "type": "object",
+            "properties": {
+              "stdout": {
+                "type": "string"
+              },
+              "stderr": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "mode",
+          "oneshot",
+          "disabled",
+          "recreate",
+          "restart",
+          "timeouts",
+          "resources",
+          "logging"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "version",
+    "args",
+    "services"
+  ],
+  "additionalProperties": false
+}

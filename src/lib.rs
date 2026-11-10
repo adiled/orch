@@ -1,4 +1,6 @@
+pub mod canonical;
 pub mod error;
+pub mod json;
 pub mod parser;
 pub mod types;
 

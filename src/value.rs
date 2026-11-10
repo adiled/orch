@@ -9,7 +9,7 @@ use crate::types::{PortMapping, RecreatePolicy, RestartPolicy, ServiceMode, Volu
 use crate::vars;
 
 const MAX_HOSTNAME_LABEL_LEN: usize = 63;
-const IO_WEIGHT_RANGE: std::ops::RangeInclusive<u32> = 10..=1000;
+const IO_WEIGHT_RANGE: std::ops::RangeInclusive<u32> = 1..=10000;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Setting {
@@ -179,9 +179,9 @@ fn setting(directive: Directive, text: &str) -> Result<Setting, String> {
         Directive::User => Setting::User(user_name(text)?),
         Directive::Stop => Setting::StopCommand(free_text(keyword, text)?),
         Directive::Reload => Setting::ReloadCommand(free_text(keyword, text)?),
-        Directive::Workdir => Setting::Workdir(free_text(keyword, text)?),
+        Directive::Workdir => Setting::Workdir(path(keyword, text)?),
         Directive::Env => env(text)?,
-        Directive::EnvFile => Setting::EnvFile(free_text(keyword, text)?),
+        Directive::EnvFile => Setting::EnvFile(path(keyword, text)?),
         Directive::Requires => Setting::Requires(service_names(keyword, text)?),
         Directive::After => Setting::After(service_names(keyword, text)?),
         Directive::Healthcheck => Setting::Healthcheck(free_text(keyword, text)?),
@@ -202,8 +202,8 @@ fn setting(directive: Directive, text: &str) -> Result<Setting, String> {
         Directive::LimitNproc => Setting::LimitNproc(integer(keyword, text)?),
         Directive::TasksMax => Setting::TasksMax(integer(keyword, text)?),
         Directive::IoWeight => Setting::IoWeight(io_weight(text)?),
-        Directive::Stdout => Setting::Stdout(free_text(keyword, text)?),
-        Directive::Stderr => Setting::Stderr(free_text(keyword, text)?),
+        Directive::Stdout => Setting::Stdout(path(keyword, text)?),
+        Directive::Stderr => Setting::Stderr(path(keyword, text)?),
         Directive::Clear => Setting::Clear(clear_target(text)?),
     })
 }
@@ -222,6 +222,27 @@ fn free_text(keyword: &str, text: &str) -> Result<String, String> {
         ));
     }
     Ok(text.to_string())
+}
+
+fn is_rooted(path: &str) -> bool {
+    path.starts_with('/') || path == "~" || path.starts_with("~/")
+}
+
+fn path(keyword: &str, text: &str) -> Result<String, String> {
+    let path = free_text(keyword, text)?;
+    if is_rooted(&path) {
+        Ok(path)
+    } else {
+        Err(format!(
+            "{keyword} path \"{path}\" must be absolute or start with ~"
+        ))
+    }
+}
+
+fn is_volume_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 fn is_digits(text: &str) -> bool {
@@ -459,13 +480,21 @@ fn volume_mount(text: &str) -> Result<VolumeMount, String> {
             ));
         }
     };
-    let is_host_path = ["/", "./", "../"]
-        .iter()
-        .any(|prefix| source.starts_with(prefix));
+    let is_named = !is_rooted(source);
+    if is_named && !is_volume_name(source) {
+        return Err(format!(
+            "invalid VOLUME source '{source}': use an absolute path, a path starting with ~, or a volume name"
+        ));
+    }
+    if !is_rooted(destination) {
+        return Err(format!(
+            "VOLUME destination '{destination}' must be absolute or start with ~"
+        ));
+    }
     Ok(VolumeMount {
         source: source.to_string(),
         destination: without_trailing_slashes(destination),
-        is_named: !is_host_path,
+        is_named,
         read_only,
     })
 }
@@ -530,7 +559,7 @@ mod tests {
 
     #[test]
     fn volume_takes_an_optional_mode() {
-        let read_only = volume_mount("./config:/etc/app:ro").unwrap();
+        let read_only = volume_mount("~/config:/etc/app:ro").unwrap();
         assert!(read_only.read_only);
         assert!(!read_only.is_named);
         assert_eq!(read_only.destination, "/etc/app");
@@ -547,8 +576,29 @@ mod tests {
 
     #[test]
     fn volume_rejects_empty_parts_and_unknown_modes() {
-        for bad in [":/data", "/h:", "/h", "/h:/c:z", "/h:/c:ro:x", "a : /b"] {
+        for bad in [
+            ":/data",
+            "/h:",
+            "/h",
+            "/h:/c:z",
+            "/h:/c:ro:x",
+            "a : /b",
+            "./rel:/c",
+            "../rel:/c",
+            "a:rel",
+            "bad name:/c",
+        ] {
             assert!(volume_mount(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn paths_are_absolute_or_home_relative() {
+        for good in ["/app", "/", "~", "~/logs/app.log"] {
+            assert!(path("WORKDIR", good).is_ok(), "{good}");
+        }
+        for bad in ["app", "./app", "../app", "~other/app", ".env.local"] {
+            assert!(path("WORKDIR", bad).is_err(), "{bad}");
         }
     }
 
@@ -594,7 +644,9 @@ mod tests {
 
     #[test]
     fn io_weight_is_range_checked() {
-        assert!(io_weight("100").is_ok());
-        assert!(io_weight("5000").unwrap_err().contains("10-1000"));
+        assert!(io_weight("1").is_ok());
+        assert!(io_weight("10000").is_ok());
+        assert!(io_weight("0").is_err());
+        assert!(io_weight("10001").unwrap_err().contains("1-10000"));
     }
 }

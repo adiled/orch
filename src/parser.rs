@@ -783,10 +783,10 @@ SERVICE app\nRUN python run\nREQUIRES db cache\n";
 
     #[test]
     fn test_resources__io_weight_out_of_range() {
-        let errors = parse_err("SERVICE x\nFROM img\nIO_WEIGHT 9\n");
+        let errors = parse_err("SERVICE x\nFROM img\nIO_WEIGHT 0\n");
         assert!(!errors.is_empty());
 
-        let errors = parse_err("SERVICE x\nFROM img\nIO_WEIGHT 1001\n");
+        let errors = parse_err("SERVICE x\nFROM img\nIO_WEIGHT 10001\n");
         assert!(!errors.is_empty());
     }
 
@@ -867,7 +867,7 @@ SERVICE grafana
 RUN grafana server --http-addr 0.0.0.0:${grafana_port}
 WORKDIR /var/lib/grafana
 ENV GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-ENV_FILE .env.local
+ENV_FILE ~/.env.local
 REQUIRES prometheus loki
 AFTER localstack
 HEALTHCHECK http://localhost:${grafana_port}/api/health
@@ -1080,11 +1080,11 @@ PUBLISH 9090:80
 SERVICE db
 FROM postgres:15
 VOLUME pgdata:/var/lib/postgresql/data
-VOLUME ./config:/etc/postgresql
+VOLUME ~/config:/etc/postgresql
     "#;
         let overlay = r#"
 SERVICE db
-VOLUME ./local-config:/etc/postgresql
+VOLUME ~/local-config:/etc/postgresql
     "#;
         let orch = parse_files_ok(&[("base.orch", base), ("overlay.orch", overlay)]);
         assert_eq!(orch.services[0].volumes.len(), 2);
@@ -1093,7 +1093,7 @@ VOLUME ./local-config:/etc/postgresql
             .iter()
             .find(|v| v.destination == "/etc/postgresql")
             .unwrap();
-        assert_eq!(etc.source, "./local-config");
+        assert_eq!(etc.source, "~/local-config");
         assert!(!etc.is_named);
     }
 
