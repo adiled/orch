@@ -1,7 +1,9 @@
-orchfile    ::= ( line newline )*
-line        ::= blank | comment | version | arg | service_decl | directive
+/* Directives start at column 0. Trailing whitespace on a line is not part of any value. */
+orchfile    ::= bom? line ( newline line )*   /* the final line ending is optional */
+line        ::= blank | comment | ( version | arg | service_decl | directive ) ws?
 blank       ::= ws*
 comment     ::= ws* '#' any*
+bom         ::= #xFEFF   /* optional UTF-8 byte-order mark; ignored */
 
 version     ::= 'ORCH_VERSION' ws version_number
 arg         ::= 'ARG' ws identifier '=' value
@@ -31,11 +33,11 @@ container_directive
             ::= 'ENTRYPOINT' ws command_string
               | 'CMD' ws command_string
               | 'PUBLISH' ws ( host_address ':' )? port ':' port
-              | 'VOLUME' ws volume_source ':' path
+              | 'VOLUME' ws volume_source ':' volume_destination ( ':' volume_mode )?
 
 /* Host-only */
 host_directive
-            ::= 'USER' ws identifier
+            ::= 'USER' ws user_name
               | 'STOP' ws command_string
               | 'RELOAD' ws command_string
 
@@ -100,16 +102,26 @@ common_directive
 
 /* Terminals */
 service_name ::= letter ( letter | digit | '-' )*   /* max 63 chars */
-identifier  ::= letter ( letter | digit | '_' )*
-env_key     ::= ( letter | '_' ) ( letter | digit | '_' )*
+identifier  ::= ( alpha | '_' ) ( alpha | digit | '_' )*   /* ARG names */
+env_key     ::= identifier
+user_name   ::= ( alpha | digit | '_' ) ( alpha | digit | '_' | '-' | '.' )*
 
-image_ref   ::= ( any - newline )+
-command_string ::= ( any - newline )+
-path        ::= ( any - newline )+
-value       ::= ( any - newline )*
-url         ::= ( 'http://' | 'https://' ) ( any - newline )+
+volume_source      ::= volume_part   /* host path or named volume */
+volume_destination ::= volume_part   /* container path */
+volume_part ::= ( visible - ':' ) ( ( any - ':' )* ( visible - ':' ) )?
+volume_mode ::= 'ro' | 'rw'          /* rw if omitted */
 
-var_ref     ::= '${' identifier '}'
+/* Free text. It never starts or ends with whitespace. */
+text        ::= visible ( any* visible )?
+image_ref   ::= text
+command_string ::= text
+path        ::= text
+value       ::= ( any* visible )?   /* after '='; may be empty */
+url         ::= ( 'http://' | 'https://' ) text
+
+/* var_ref and var_escape may appear anywhere in the value of a directive inside a SERVICE block. Each value must match its rule after expansion (see SPEC.md). */
+var_ref     ::= '${' identifier '}'   /* identifier MUST be a declared ARG */
+var_escape  ::= '$${'                 /* a literal '${'; never starts a var_ref */
 
 bool        ::= 'true' | 'false'
 restart_policy ::= 'no' | 'always' | 'on-failure'
@@ -123,10 +135,21 @@ integer     ::= digit+
 port        ::= digit+   /* 1-65535 */
 version_number ::= integer '.' integer '.' integer ( '-' prerelease )?
 prerelease  ::= ( letter | digit | '-' | '.' )+   /* e.g. rc, beta.1 */
-host_address ::= ( letter | digit | '.' | ':' )+   /* IPv4, IPv6, or hostname */
+
+/* A hostname is resolved by platform tooling, never by the parser. */
+host_address ::= ipv4 | ipv6 | hostname
+ipv4        ::= octet '.' octet '.' octet '.' octet
+octet       ::= digit+                          /* 0-255 */
+ipv6        ::= ( hex_digit | ':' | '.' )+      /* RFC 4291 text form, without brackets */
+hostname    ::= label ( '.' label )*            /* RFC 1123 */
+label       ::= alnum ( ( alnum | '-' )* alnum )?   /* max 63 chars */
+alnum       ::= alpha | digit
+hex_digit   ::= digit | [a-fA-F]
 
 letter      ::= [a-z]
+alpha       ::= [a-zA-Z]
 digit       ::= [0-9]
 ws          ::= [ #x9]+
-newline     ::= #xA
-any         ::= [#x20-#xFFFF]
+newline     ::= #xA | #xD #xA
+any         ::= #x9 | [#x20-#x7E] | [#xA0-#xD7FF] | [#xE000-#x10FFFF]   /* no control characters except tab; no surrogates */
+visible     ::= any - [ #x9]

@@ -19,7 +19,6 @@
     {|}{{{\color{red!70!black}|}}}1
     {(}{{{\color{gray!70!black}(}}}1
     {)}{{{\color{gray!70!black})}}}1
-    {*}{{{\color{red!70!black}*}}}1
     {+}{{{\color{red!70!black}+}}}1
     {?}{{{\color{red!70!black}?}}}1,
 }
@@ -97,162 +96,204 @@ The canonical source is \texttt{grammar.ebnf} in the repository root.
 \subsection{Document Structure}
 
 \begin{lstlisting}
-orchfile     ::= ( line newline )*
-line         ::= blank | comment | arg | service_decl | directive
-blank        ::= ws*
-comment      ::= ws* '#' any*
+/* Directives start at column 0. Trailing whitespace on a line is not part of any value. */
+orchfile    ::= bom? line ( newline line )*   /* the final line ending is optional */
+line        ::= blank | comment | ( version | arg | service_decl | directive ) ws?
+blank       ::= ws*
+comment     ::= ws* '#' any*
+bom         ::= #xFEFF   /* optional UTF-8 byte-order mark; ignored */
 \end{lstlisting}
 
 \subsection{Top-level Declarations}
 
 \begin{lstlisting}
-arg          ::= 'ARG' ws identifier '=' value
+version     ::= 'ORCH_VERSION' ws version_number
+arg         ::= 'ARG' ws identifier '=' value
 service_decl ::= 'SERVICE' ws service_name
 \end{lstlisting}
 
 \subsection{Directives}
 
 \begin{lstlisting}
-directive    ::= mode_directive
-               | container_directive
-               | host_directive
-               | common_directive
-               | clear_directive
+directive   ::= mode_directive
+              | container_directive
+              | host_directive
+              | common_directive
+              | clear_directive
 \end{lstlisting}
 
 \subsubsection{Overlay Composition}
 
 \begin{lstlisting}
+/* Overlay composition - resets a list-type directive before merge */
 clear_directive
-             ::= 'CLEAR' ws clearable_target
+            ::= 'CLEAR' ws clearable_target
 
 clearable_target
-             ::= 'ENV' | 'ENV_FILE' | 'PUBLISH' | 'VOLUME'
-               | 'REQUIRES' | 'AFTER'
+            ::= 'ENV' | 'ENV_FILE' | 'PUBLISH' | 'VOLUME'
+              | 'REQUIRES' | 'AFTER'
 \end{lstlisting}
 
 \subsubsection{Execution Mode (mutually exclusive per service)}
 
 \begin{lstlisting}
+/* Execution mode - mutually exclusive per service */
 mode_directive
-             ::= 'FROM' ws image_ref
-               | 'RUN' ws command_string
+            ::= 'FROM' ws image_ref
+              | 'RUN' ws command_string
 \end{lstlisting}
 
 \subsubsection{Container-only Directives}
 
 \begin{lstlisting}
+/* Container-only */
 container_directive
-             ::= 'ENTRYPOINT' ws command_string
-               | 'CMD' ws command_string
-               | 'PUBLISH' ws port ':' port
-               | 'VOLUME' ws volume_source ':' path
+            ::= 'ENTRYPOINT' ws command_string
+              | 'CMD' ws command_string
+              | 'PUBLISH' ws ( host_address ':' )? port ':' port
+              | 'VOLUME' ws volume_source ':' volume_destination ( ':' volume_mode )?
 \end{lstlisting}
 
 \subsubsection{Host-only Directives}
 
 \begin{lstlisting}
+/* Host-only */
 host_directive
-             ::= 'USER' ws identifier
-               | 'STOP' ws command_string
-               | 'RELOAD' ws command_string
+            ::= 'USER' ws user_name
+              | 'STOP' ws command_string
+              | 'RELOAD' ws command_string
 \end{lstlisting}
 
 \subsubsection{Common Directives}
 
 \begin{lstlisting}
-common_directive
-             ::= env_directive
-               | dependency_directive
-               | health_directive
-               | lifecycle_directive
-               | restart_directive
-               | timeout_directive
-               | resource_directive
-               | logging_directive
-
+/* Common - environment */
 env_directive
-             ::= 'WORKDIR' ws path
-               | 'ENV' ws env_key '=' value
-               | 'ENV_FILE' ws path
+            ::= 'WORKDIR' ws path
+              | 'ENV' ws env_key '=' value
+              | 'ENV_FILE' ws path
 
+/* Common - dependencies */
 dependency_directive
-             ::= 'REQUIRES' ws service_name ( ws service_name )*
-               | 'AFTER' ws service_name ( ws service_name )*
+            ::= 'REQUIRES' ws service_name ( ws service_name )*
+              | 'AFTER' ws service_name ( ws service_name )*
 
+/* Common - health */
 health_directive
-             ::= 'HEALTHCHECK' ws ( url | command_string )
-               | 'READINESS_TIMEOUT' ws duration
+            ::= 'HEALTHCHECK' ws ( url | command_string )
+              | 'READINESS_TIMEOUT' ws duration
 
+/* Common - lifecycle */
 lifecycle_directive
-             ::= 'ONESHOT' ws bool
-               | 'DISABLED' ws bool
-               | 'RECREATE' ws recreate_policy
+            ::= 'ONESHOT' ws bool
+              | 'DISABLED' ws bool
+              | 'RECREATE' ws recreate_policy
 
+/* Common - restart */
 restart_directive
-             ::= 'RESTART' ws restart_policy
-               | 'RESTART_DELAY' ws duration
-               | 'START_LIMIT_BURST' ws integer
-               | 'START_LIMIT_INTERVAL' ws duration
+            ::= 'RESTART' ws restart_policy
+              | 'RESTART_DELAY' ws duration
+              | 'START_LIMIT_BURST' ws integer
+              | 'START_LIMIT_INTERVAL' ws duration
 
+/* Common - timeouts */
 timeout_directive
-             ::= 'TIMEOUT_START' ws duration
-               | 'TIMEOUT_STOP' ws duration
+            ::= 'TIMEOUT_START' ws duration
+              | 'TIMEOUT_STOP' ws duration
 
+/* Common - resources */
 resource_directive
-             ::= 'MEMORY' ws memory_size
-               | 'CPUS' ws number
-               | 'CPU_QUOTA' ws percentage
-               | 'LIMIT_NOFILE' ws integer
-               | 'LIMIT_NPROC' ws integer
-               | 'TASKS_MAX' ws integer
-               | 'IO_WEIGHT' ws integer     /* 10-1000 */
+            ::= 'MEMORY' ws memory_size
+              | 'CPUS' ws number
+              | 'CPU_QUOTA' ws percentage
+              | 'LIMIT_NOFILE' ws integer
+              | 'LIMIT_NPROC' ws integer
+              | 'TASKS_MAX' ws integer
+              | 'IO_WEIGHT' ws integer   /* 10-1000 */
 
+/* Common - logging */
 logging_directive
-             ::= 'STDOUT' ws path
-               | 'STDERR' ws path
+            ::= 'STDOUT' ws path
+              | 'STDERR' ws path
+
+common_directive
+            ::= env_directive
+              | dependency_directive
+              | health_directive
+              | lifecycle_directive
+              | restart_directive
+              | timeout_directive
+              | resource_directive
+              | logging_directive
 \end{lstlisting}
 
 \subsection{Terminals}
 
 \begin{lstlisting}
-service_name    ::= letter ( letter | digit | '-' )*  /* max 63 chars */
-identifier      ::= letter ( letter | digit | '_' )*
-env_key         ::= ( letter | '_' ) ( letter | digit | '_' )*
+/* Terminals */
+service_name ::= letter ( letter | digit | '-' )*   /* max 63 chars */
+identifier  ::= ( alpha | '_' ) ( alpha | digit | '_' )*   /* ARG names */
+env_key     ::= identifier
+user_name   ::= ( alpha | digit | '_' ) ( alpha | digit | '_' | '-' | '.' )*
 
-image_ref       ::= ( any - newline )+
-command_string  ::= ( any - newline )+
-path            ::= ( any - newline )+
-value           ::= ( any - newline )*
-url             ::= ( 'http://' | 'https://' ) ( any - newline )+
+volume_source      ::= volume_part   /* host path or named volume */
+volume_destination ::= volume_part   /* container path */
+volume_part ::= ( visible - ':' ) ( ( any - ':' )* ( visible - ':' ) )?
+volume_mode ::= 'ro' | 'rw'          /* rw if omitted */
 
-var_ref         ::= '${' identifier '}'
+/* Free text. It never starts or ends with whitespace. */
+text        ::= visible ( any* visible )?
+image_ref   ::= text
+command_string ::= text
+path        ::= text
+value       ::= ( any* visible )?   /* after '='; may be empty */
+url         ::= ( 'http://' | 'https://' ) text
 
-bool            ::= 'true' | 'false'
-restart_policy  ::= 'no' | 'always' | 'on-failure'
+/* var_ref and var_escape may appear anywhere in the value of a directive inside a SERVICE block. Each value must match its rule after expansion (see SPEC.md). */
+var_ref     ::= '${' identifier '}'   /* identifier MUST be a declared ARG */
+var_escape  ::= '$${'                 /* a literal '${'; never starts a var_ref */
+
+bool        ::= 'true' | 'false'
+restart_policy ::= 'no' | 'always' | 'on-failure'
 recreate_policy ::= 'always' | 'never'
 
-duration        ::= integer ( 's' | 'm' )
-memory_size     ::= integer ( 'K' | 'M' | 'G' )
-percentage      ::= integer '%'
-number          ::= integer ( '.' digit+ )?
-integer         ::= digit+
-port            ::= digit+                             /* 1-65535 */
+duration    ::= integer ( 's' | 'm' )
+memory_size ::= integer ( 'K' | 'M' | 'G' )
+percentage  ::= integer '%'
+number      ::= integer ( '.' digit+ )?
+integer     ::= digit+
+port        ::= digit+   /* 1-65535 */
+version_number ::= integer '.' integer '.' integer ( '-' prerelease )?
+prerelease  ::= ( letter | digit | '-' | '.' )+   /* e.g. rc, beta.1 */
 
-letter          ::= [a-z]
-digit           ::= [0-9]
-ws              ::= [ \t]+
-newline         ::= \n
-any             ::= [U+0020-U+FFFF]
+/* A hostname is resolved by platform tooling, never by the parser. */
+host_address ::= ipv4 | ipv6 | hostname
+ipv4        ::= octet '.' octet '.' octet '.' octet
+octet       ::= digit+                          /* 0-255 */
+ipv6        ::= ( hex_digit | ':' | '.' )+      /* RFC 4291 text form, without brackets */
+hostname    ::= label ( '.' label )*            /* RFC 1123 */
+label       ::= alnum ( ( alnum | '-' )* alnum )?   /* max 63 chars */
+alnum       ::= alpha | digit
+hex_digit   ::= digit | [a-fA-F]
+
+letter      ::= [a-z]
+alpha       ::= [a-zA-Z]
+digit       ::= [0-9]
+ws          ::= [ #x9]+
+newline     ::= #xA | #xD #xA
+any         ::= #x9 | [#x20-#x7E] | [#xA0-#xD7FF] | [#xE000-#x10FFFF]   /* no control characters except tab; no surrogates */
+visible     ::= any - [ #x9]
 \end{lstlisting}
 
 \medskip
 \noindent
-\textbf{Note:} \texttt{var\_ref} (\texttt{\$\{name\}}) may appear within any
-\texttt{value}, \texttt{path}, \texttt{image\_ref}, or \texttt{command\_string}.
-Variable expansion is performed at parse time using resolved ARG values.
-Unresolved references to built-in variables (e.g.\ \texttt{\$\{ORCH\_PROJECT\}})
-are preserved for runtime resolution.
+\textbf{Note:} The grammar describes each value \emph{after} variable
+expansion. \texttt{var\_ref} (\texttt{\$\{name\}}) may appear anywhere in the
+value of a directive inside a SERVICE block, and \texttt{var\_escape}
+(\texttt{\$\$\{}) stands for a literal \texttt{\$\{}. With
+\texttt{ARG port=8080}, \texttt{PUBLISH \$\{port\}:80} is checked as
+\texttt{PUBLISH 8080:80}. Every name must be a declared ARG; there are no
+built-in variables.
 
 % ============================================================================
 \newpage
@@ -269,18 +310,21 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
 \noindent\textbf{orchfile}
 \medskip
 
-\begin{tikzpicture}[
-  start chain=going right,
-  node distance=5mm and 4mm,
-  every node/.style={on chain},
-  every join/.style={rr arrow},
-]
+\begin{tikzpicture}[node distance=5mm and 4mm]
   \node[rr point] (start) {};
-  \node[rr nonterminal,join] {line};
-  \node[rr terminal,join] {\textbackslash n};
-  \node[rr point,join] (end) {};
-  \draw[rr line,rounded corners] (end.east) -- ++(0.3,0) |- ([yshift=-8mm]start.south) -| ([xshift=-3mm]start.west) -- (start.west);
-  \draw[rr line,dashed,rounded corners] (start.north) ++ (0,3mm) -- ++(0,3mm) -| ([xshift=3mm]end.east) -- ++ (0,-3mm);
+  \node[rr nonterminal,right=8mm of start] (bom) {bom};
+  \node[rr nonterminal,right=10mm of bom] (line) {line};
+  \node[rr point,right=10mm of line] (end) {};
+  \node[rr nonterminal,below=6mm of line] (nl) {newline};
+
+  \draw[rr arrow] (start) -- (bom);
+  \draw[rr arrow] (bom) -- (line);
+  \draw[rr arrow] (line) -- (end);
+  % bom is optional
+  \draw[rr line,rounded corners] ([xshift=4mm]start.east) -- ++(0,5mm) -| ([xshift=-5mm]line.west);
+  % ( newline line )* : loop back through newline
+  \draw[rr arrow,rounded corners] ([xshift=5mm]line.east) |- (nl.east);
+  \draw[rr arrow,rounded corners] (nl.west) -| ([xshift=-5mm]line.west);
 \end{tikzpicture}
 
 \bigskip
@@ -336,7 +380,9 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \node[rr terminal,below=8mm of from] (run) {RUN};
   \node[rr nonterminal,right=of run] (cmd) {command\_string};
 
-  \node[rr point,right=of img] (end) {};
+  % end point to the right of the longer row
+  \path let \p1=(img.east), \p2=(cmd.east) in coordinate (endx) at ({max(\x1,\x2)+6mm}, 0);
+  \node[rr point] (end) at (endx) {};
 
   \draw[rr arrow] (start) -- (from);
   \draw[rr arrow] (from) -- (img);
@@ -362,19 +408,24 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \node[rr terminal,below=7mm of ep] (cm) {CMD};
   \node[rr nonterminal,right=of cm] (cm_v) {command\_string};
 
-  \node[rr terminal,below=7mm of cm] (pub) {PUBLISH};
-  \node[rr nonterminal,right=of pub] (p1) {port};
+  % PUBLISH ( host_address ':' )? port ':' port
+  \node[rr terminal,below=10mm of cm] (pub) {PUBLISH};
+  \node[rr nonterminal,right=8mm of pub] (ha) {host\_address};
+  \node[rr terminal,right=of ha] (hac) {:};
+  \node[rr nonterminal,right=8mm of hac] (p1) {port};
   \node[rr terminal,right=of p1] (colon) {:};
   \node[rr nonterminal,right=of colon] (p2) {port};
 
-  \node[rr terminal,below=7mm of pub] (vol) {VOLUME};
+  % VOLUME volume_source ':' volume_destination ( ':' volume_mode )?
+  \node[rr terminal,below=10mm of pub] (vol) {VOLUME};
   \node[rr nonterminal,right=of vol] (vs) {volume\_source};
   \node[rr terminal,right=of vs] (colon2) {:};
-  \node[rr nonterminal,right=of colon2] (pa) {path};
+  \node[rr nonterminal,right=of colon2] (pa) {volume\_destination};
+  \node[rr terminal,right=8mm of pa] (colon3) {:};
+  \node[rr nonterminal,right=of colon3] (vm) {volume\_mode};
 
-  % end point to the right of the longest row
-  \node[rr point] (end) at (pa.east -| p2.east) {};
-  \coordinate (endx) at ([xshift=8mm]p2.east);
+  % common exit, to the right of the longest row
+  \path let \p1=(p2.east), \p2=(vm.east) in coordinate (endx) at ({max(\x1,\x2)+8mm}, 0);
   \node[rr point] (end) at (endx) {};
 
   \draw[rr arrow] (start) -- (ep);
@@ -386,16 +437,22 @@ Rounded boxes are \textit{terminals} (literal text), rectangular boxes are
   \draw[rr line,rounded corners] (cm_v.east) -| (endx);
 
   \draw[rr line,rounded corners] (start.east) |- (pub.west);
-  \draw[rr arrow] (pub) -- (p1);
+  \draw[rr arrow] (pub) -- (ha);
+  \draw[rr arrow] (ha) -- (hac);
+  \draw[rr arrow] (hac) -- (p1);
+  \draw[rr line,rounded corners] ([xshift=-4mm]ha.west) -- ++(0,5mm) -| ([xshift=4mm]hac.east);
   \draw[rr arrow] (p1) -- (colon);
   \draw[rr arrow] (colon) -- (p2);
-  \draw[rr line] (p2.east) -- (endx);
+  \draw[rr line,rounded corners] (p2.east) -| (endx);
 
   \draw[rr line,rounded corners] (start.east) |- (vol.west);
   \draw[rr arrow] (vol) -- (vs);
   \draw[rr arrow] (vs) -- (colon2);
   \draw[rr arrow] (colon2) -- (pa);
-  \draw[rr line,rounded corners] (pa.east) -| (endx);
+  \draw[rr arrow] (pa) -- (colon3);
+  \draw[rr arrow] (colon3) -- (vm);
+  \draw[rr line,rounded corners] ([xshift=4mm]pa.east) -- ++(0,5mm) -| ([xshift=4mm]vm.east);
+  \draw[rr line,rounded corners] (vm.east) -| (endx);
 \end{tikzpicture}
 
 \bigskip
@@ -587,6 +644,21 @@ in the EBNF grammar alone:
 
   \item[C4: Dependency acyclicity] \texttt{REQUIRES} and \texttt{AFTER}
     edges must form a directed acyclic graph (DAG). Cycles are a parse error.
+
+  \item[C5: Declared variables] Every \texttt{\$\{name\}} must name an
+    \texttt{ARG} declared in one of the merged files.
+
+  \item[C6: One entry per key] Within a service, each container port is
+    published at most once (\texttt{PUBLISH}) and each destination is mounted
+    at most once (\texttt{VOLUME}).
+
+  \item[C7: No repeats within a file] Within one file, a service sets each
+    scalar directive and each \texttt{ENV} key at most once. Across files,
+    overlays replace values.
 \end{description}
+
+\noindent Numeric ranges noted in the grammar's comments (ports 1--65535, IPv4
+octets 0--255, hostname labels and service names up to 63 characters,
+\texttt{IO\_WEIGHT} 10--1000) are also enforced by the parser.
 
 \end{document}
